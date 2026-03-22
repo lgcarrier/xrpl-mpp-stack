@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+import string
+
+XRP_CODE = "XRP"
+RLUSD_CODE = "RLUSD"
+RLUSD_HEX = "524C555344000000000000000000000000000000"
+RLUSD_MAINNET_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"
+RLUSD_TESTNET_ISSUER = "rnEVYfAWYP5HpPaWQiPSJMyDeUiEJ6zhy2"
+USDC_CODE = "USDC"
+USDC_HEX = "5553444300000000000000000000000000000000"
+USDC_MAINNET_ISSUER = "rGm7WCVp9gb4jZHWTEtGUr4dd74z2XuWhE"
+USDC_TESTNET_ISSUER = "rHuGNhqTG32mfmAvWA8hUyWRLV3tCSwKQt"
+TF_PARTIAL_PAYMENT = 0x00020000
+
+NETWORK_RLUSD_ISSUERS = {
+    "xrpl:0": RLUSD_MAINNET_ISSUER,
+    "xrpl:1": RLUSD_TESTNET_ISSUER,
+}
+NETWORK_USDC_ISSUERS = {
+    "xrpl:0": USDC_MAINNET_ISSUER,
+    "xrpl:1": USDC_TESTNET_ISSUER,
+}
+
+_XRP_DROPS_PER_XRP = Decimal("1000000")
+_HEX_DIGITS = frozenset(string.hexdigits)
+
+
+@dataclass(frozen=True)
+class AssetKey:
+    code: str
+    issuer: str | None = None
+
+
+@dataclass(frozen=True)
+class NormalizedAmount:
+    asset: AssetKey
+    value: Decimal
+    drops: int | None = None
+
+
+def normalize_currency_code(currency: str) -> str:
+    normalized = str(currency).strip().upper()
+    if not normalized:
+        raise ValueError("Asset code is required")
+
+    if len(normalized) == 40 and set(normalized) <= _HEX_DIGITS:
+        decoded = bytes.fromhex(normalized)
+        decoded_ascii = decoded.rstrip(b"\x00")
+        if decoded_ascii and all(32 <= byte <= 126 for byte in decoded_ascii):
+            normalized = decoded_ascii.decode("ascii").upper()
+
+    return normalized
+
+
+def xrpl_currency_code(code: str) -> str:
+    raw_code = str(code).strip()
+    if not raw_code:
+        raise ValueError("Asset code is required")
+
+    if len(raw_code) == 40 and set(raw_code) <= _HEX_DIGITS:
+        return raw_code.upper()
+
+    normalized = normalize_currency_code(raw_code)
+    if len(normalized) == 3:
+        return normalized
+    if len(normalized) > 20:
+        raise ValueError("Issued currency codes must be 20 ASCII bytes or fewer")
+    return normalized.encode("ascii").hex().upper().ljust(40, "0")
+
+
+def parse_allowed_issued_assets(raw_assets: str) -> list[AssetKey]:
+    parsed_assets: list[AssetKey] = []
+    seen_assets: set[AssetKey] = set()
+
+    for raw_entry in raw_assets.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+
+        code, separator, issuer = entry.partition(":")
+        normalized_code = normalize_currency_code(code)
+        normalized_issuer = issuer.strip()
+        if not separator or not normalized_issuer:
+            raise ValueError("ALLOWED_ISSUED_ASSETS entries must use CODE:ISSUER format")
+        if normalized_code == XRP_CODE:
+            raise ValueError("ALLOWED_ISSUED_ASSETS cannot include XRP")
+
+        asset = AssetKey(code=normalized_code, issuer=normalized_issuer)
+        if asset not in seen_assets:
+            parsed_assets.append(asset)
+            seen_assets.add(asset)
+
+    return parsed_assets
+
+
+def supported_asset_keys(network_id: str, raw_assets: str) -> list[AssetKey]:
+    supported_assets = [AssetKey(code=XRP_CODE, issuer=None)]
+    seen_assets = {supported_assets[0]}
+
+    built_in_assets = (
+        (RLUSD_CODE, NETWORK_RLUSD_ISSUERS.get(network_id)),
+        (USDC_CODE, NETWORK_USDC_ISSUERS.get(network_id)),
+    )
+    for code, issuer in built_in_assets:
+        if not issuer:
+            continue
+        asset = AssetKey(code=code, issuer=issuer)
+        if asset not in seen_assets:
+            supported_assets.append(asset)
+            seen_assets.add(asset)
+
+    for asset in parse_allowed_issued_assets(raw_assets):
+        if asset not in seen_assets:
+            supported_assets.append(asset)
+            seen_assets.add(asset)
+
+    return supported_assets
+
+
+def asset_identifier_from_parts(code: str, issuer: str | None = None) -> str:
+    normalized_code = normalize_currency_code(code)
+    if issuer is None:
+        return f"{normalized_code}:native"
+    return f"{normalized_code}:{issuer.strip()}"
+
+
+def parse_asset_identifier(identifier: str) -> AssetKey:
+    code, separator, issuer = identifier.partition(":")
+    normalized_code = normalize_currency_code(code)
+    if not separator:
+        raise ValueError("Asset identifier must use CODE:ISSUER or CODE:native")
+
+    normalized_issuer = issuer.strip()
+    if normalized_issuer == "native":
+        return AssetKey(code=normalized_code, issuer=None)
+    if not normalized_issuer:
+        raise ValueError("Asset identifier issuer is required")
+    return AssetKey(code=normalized_code, issuer=normalized_issuer)
+
+
+def format_decimal(value: Decimal) -> str:
+    rendered = format(value.normalize(), "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def format_amount(amount: NormalizedAmount) -> str:
+    if amount.drops is not None:
+        xrp_value = Decimal(amount.drops) / _XRP_DROPS_PER_XRP
+        return f"{format_decimal(xrp_value)} {XRP_CODE}"
+    return f"{format_decimal(amount.value)} {amount.asset.code}"

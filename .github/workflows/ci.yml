@@ -1,0 +1,234 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install -r docs/requirements.txt
+
+      - name: Build package artifacts
+        run: |
+          for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do
+            (
+              cd "$package"
+              python -m build --sdist
+              python -m build --wheel
+            )
+          done
+
+      - name: Validate package metadata
+        run: twine check packages/*/dist/*
+
+      - name: Smoke import stack packages
+        run: python -c "import xrpl_mpp_core, xrpl_mpp_facilitator, xrpl_mpp_middleware, xrpl_mpp_client, xrpl_mpp_payer"
+
+      - name: Compile source files
+        run: PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools
+
+      - name: Build docs site
+        run: mkdocs build --strict
+
+      - name: Run pytest
+        run: PYTHONPYCACHEPREFIX=/tmp/pycache pytest -q
+
+      - name: Build Docker image
+        run: docker build -t xrpl-mpp-facilitator:ci .
+
+      - name: Verify Docker image runs as non-root and excludes local artifacts
+        run: |
+          docker run --rm xrpl-mpp-facilitator:ci \
+            python -c "import os, pathlib; assert os.getuid() != 0, 'container runs as root'; forbidden = [path for path in ('/app/.git', '/app/.env', '/app/.live-test-wallets') if pathlib.Path(path).exists()]; assert not forbidden, f'unexpected files in image: {forbidden}'"
+
+  publish-readiness:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - core
+          - facilitator
+          - middleware
+          - client
+          - payer
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Resolve package metadata
+        run: |
+          case "${{ matrix.target }}" in
+            core)
+              echo "PACKAGE_DIR=packages/core" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-core" >> "$GITHUB_ENV"
+              ;;
+            facilitator)
+              echo "PACKAGE_DIR=packages/facilitator" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-facilitator" >> "$GITHUB_ENV"
+              ;;
+            middleware)
+              echo "PACKAGE_DIR=packages/middleware" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-middleware" >> "$GITHUB_ENV"
+              ;;
+            client)
+              echo "PACKAGE_DIR=packages/client" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-client" >> "$GITHUB_ENV"
+              ;;
+            payer)
+              echo "PACKAGE_DIR=packages/payer" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-payer" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unsupported package target: ${{ matrix.target }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install packaging tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build target artifacts
+        run: |
+          (
+            cd packages/core
+            python -m build --sdist
+            python -m build --wheel
+          )
+          if [ "$PACKAGE_DIR" = "packages/payer" ]; then
+            (
+              cd packages/client
+              python -m build --sdist
+              python -m build --wheel
+            )
+          fi
+          if [ "$PACKAGE_DIR" != "packages/core" ]; then
+            (
+              cd "$PACKAGE_DIR"
+              python -m build --sdist
+              python -m build --wheel
+            )
+          fi
+
+      - name: Locate built artifacts
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          package_dir = Path(os.environ["PACKAGE_DIR"])
+          dist_dir = package_dir / "dist"
+          wheel_path = sorted(dist_dir.glob("*.whl"))
+          sdist_path = sorted(dist_dir.glob("*.tar.gz"))
+          if not wheel_path or not sdist_path:
+              raise SystemExit(f"Missing built artifacts in {dist_dir}")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"WHEEL_PATH={wheel_path[0].resolve()}\n")
+              handle.write(f"SDIST_PATH={sdist_path[0].resolve()}\n")
+              handle.write(f"WHEEL_URI={wheel_path[0].resolve().as_uri()}\n")
+          PY
+
+      - name: Validate package metadata
+        run: twine check "$WHEEL_PATH" "$SDIST_PATH"
+
+      - name: Smoke install wheel
+        run: |
+          python -m venv /tmp/wheel-venv
+          . /tmp/wheel-venv/bin/activate
+          python -m pip install --upgrade pip
+          install_args=(install --find-links "$PWD/packages/core/dist")
+          if [ "${{ matrix.target }}" = "payer" ]; then
+            install_args+=(--find-links "$PWD/packages/client/dist")
+          fi
+          python -m pip "${install_args[@]}" "$WHEEL_PATH"
+          case "${{ matrix.target }}" in
+            core)
+              python -c "import xrpl_mpp_core as package; assert package.XRP_CODE == 'XRP'"
+              ;;
+            facilitator)
+              python -c "from xrpl_mpp_facilitator import create_app; assert callable(create_app)"
+              xrpl-mpp-facilitator --help >/dev/null
+              ;;
+            middleware)
+              python -c "from xrpl_mpp_middleware import PaymentMiddlewareASGI; assert PaymentMiddlewareASGI"
+              ;;
+            client)
+              python -c "from xrpl_mpp_client import XRPLPaymentSigner; assert XRPLPaymentSigner"
+              ;;
+            payer)
+              python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
+              xrpl-mpp --help >/dev/null
+              ;;
+          esac
+
+      - name: Smoke install sdist
+        run: |
+          python -m venv /tmp/sdist-venv
+          . /tmp/sdist-venv/bin/activate
+          python -m pip install --upgrade pip
+          install_args=(install --find-links "$PWD/packages/core/dist")
+          if [ "${{ matrix.target }}" = "payer" ]; then
+            install_args+=(--find-links "$PWD/packages/client/dist")
+          fi
+          python -m pip "${install_args[@]}" "$SDIST_PATH"
+          case "${{ matrix.target }}" in
+            core)
+              python -c "import xrpl_mpp_core as package; assert package.XRP_CODE == 'XRP'"
+              ;;
+            facilitator)
+              python -c "from xrpl_mpp_facilitator import create_app; assert callable(create_app)"
+              xrpl-mpp-facilitator --help >/dev/null
+              ;;
+            middleware)
+              python -c "from xrpl_mpp_middleware import PaymentMiddlewareASGI; assert PaymentMiddlewareASGI"
+              ;;
+            client)
+              python -c "from xrpl_mpp_client import XRPLPaymentSigner; assert XRPLPaymentSigner"
+              ;;
+            payer)
+              python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
+              xrpl-mpp --help >/dev/null
+              ;;
+          esac
+
+      - name: Smoke optional extras
+        if: matrix.target == 'payer'
+        run: |
+          python -m venv /tmp/extra-venv
+          . /tmp/extra-venv/bin/activate
+          python -m pip install --upgrade pip
+          extra_name=mcp
+          install_args=(install --find-links "$PWD/packages/core/dist" --find-links "$PWD/packages/client/dist")
+          python -m pip "${install_args[@]}" "${PACKAGE_NAME}[${extra_name}] @ ${WHEEL_URI}"
+          python -c "import xrpl_mpp_payer.mcp as module; assert callable(module.main)"

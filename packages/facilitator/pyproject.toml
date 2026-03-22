@@ -1,0 +1,63 @@
+[build-system]
+requires = ["editables>=0.5", "hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xrpl-mpp-facilitator"
+version = "0.1.3"
+description = "FastAPI facilitator service for XRPL-backed MPP HTTP payments"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+  { name = "Louis-Guillaume Carrier-Bedard", email = "lgcarrier@gmail.com" },
+]
+keywords = ["xrpl", "mpp", "facilitator", "fastapi", "payments"]
+classifiers = [
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Internet :: WWW/HTTP",
+  "Typing :: Typed",
+]
+dependencies = [
+  "fastapi==0.115.0",
+  "pydantic-settings==2.6.1",
+  "python-dotenv==1.0.1",
+  "redis==5.2.1",
+  "slowapi==0.1.9",
+  "structlog==24.4.0",
+  "uvicorn>=0.30.6,<1",
+  "xrpl-py==4.5.0",
+  "xrpl-mpp-core>=0.1.3,<0.2.0",
+]
+
+[project.scripts]
+xrpl-mpp-facilitator = "xrpl_mpp_facilitator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Documentation = "https://lgcarrier.github.io/xrpl-mpp-stack/packages/facilitator/"
+Repository = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Issues = "https://github.com/lgcarrier/xrpl-mpp-stack/issues"
+Changelog = "https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xrpl_mpp_facilitator"]
+
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"
+
+[tool.hatch.build.targets.wheel.force-include]
+"LICENSE" = "LICENSE"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/xrpl_mpp_facilitator",
+  "/README.md",
+  "/LICENSE",
+  "/build_hook.py",
+]

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["editables>=0.5", "hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xrpl-mpp-core"
+version = "0.1.3"
+description = "Shared XRPL MPP wire models and helpers"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+  { name = "Louis-Guillaume Carrier-Bedard", email = "lgcarrier@gmail.com" },
+]
+keywords = ["xrpl", "mpp", "xrp", "payments"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pydantic>=2,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Documentation = "https://lgcarrier.github.io/xrpl-mpp-stack/packages/core/"
+Repository = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Issues = "https://github.com/lgcarrier/xrpl-mpp-stack/issues"
+Changelog = "https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xrpl_mpp_core"]
+
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"
+
+[tool.hatch.build.targets.wheel.force-include]
+"LICENSE" = "LICENSE"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/xrpl_mpp_core",
+  "/README.md",
+  "/LICENSE",
+  "/build_hook.py",
+]

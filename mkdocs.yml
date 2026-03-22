@@ -1,0 +1,57 @@
+site_name: Open XRPL MPP Stack
+site_description: Python-first XRPL MPP facilitator, middleware, client, payer, and shared core docs.
+site_url: https://lgcarrier.github.io/xrpl-mpp-stack/
+repo_url: https://github.com/lgcarrier/xrpl-mpp-stack
+repo_name: lgcarrier/xrpl-mpp-stack
+edit_uri: edit/main/docs/
+copyright: >-
+  <a href="https://github.com/lgcarrier/xrpl-mpp-stack" class="footer-badge-link">
+    <img alt="GitHub xrpl-mpp-stack" src="https://img.shields.io/badge/GitHub-xrpl--mpp--stack-181717?logo=github&logoColor=white">
+  </a>
+  <img alt="Docs version 0.1.0" src="https://img.shields.io/badge/docs-v0.1.0-0A7E3B">
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Guided Quickstart:
+      - Testnet XRP: quickstart/testnet-xrp.md
+  - Asset Guides:
+      - RLUSD: asset-guides/rlusd.md
+      - USDC: asset-guides/usdc.md
+  - Package Guides:
+      - Core: packages/core.md
+      - Facilitator: packages/facilitator.md
+      - Middleware: packages/middleware.md
+      - Client: packages/client.md
+      - Payer: packages/payer.md
+  - How It Works:
+      - Payment Flow: how-it-works/payment-flow.md
+      - Header Contract: how-it-works/header-contract.md
+      - Replay And Freshness: how-it-works/replay-and-freshness.md
+  - Integrations:
+      - MPP HTTP Integration: integrations/mpp-http.md
+  - Troubleshooting: troubleshooting.md
+  - Release:
+      - Release Playbook: release.md
