@@ -1,5 +1,7 @@
 # xrpl-mpp-stack
 
+[![Docs](https://img.shields.io/badge/docs-live-0A7E3B)](https://lgcarrier.github.io/xrpl-mpp-stack/)
+
 Python-first XRPL infrastructure for MPP HTTP payments.
 
 Hosted docs: <https://lgcarrier.github.io/xrpl-mpp-stack/>
