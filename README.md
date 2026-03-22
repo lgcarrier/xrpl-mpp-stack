@@ -2,6 +2,10 @@
 
 Python-first XRPL infrastructure for MPP HTTP payments.
 
+Hosted docs: <https://lgcarrier.github.io/xrpl-mpp-stack/>
+
+Upstream MPP protocol specs: <https://github.com/tempoxyz/mpp-specs>
+
 This repo migrates the original XRPL x402 stack onto the MPP HTTP model:
 
 - `xrpl-mpp-core`: shared MPP models, header codecs, challenge helpers, and XRPL asset utilities
@@ -14,6 +18,36 @@ This repo migrates the original XRPL x402 stack onto the MPP HTTP model:
 
 - `charge`: one request, one XRPL payment
 - `session`: prepaid XRPL session with `open`, `use`, `top_up`, and `close`
+
+## Payment flow at a glance
+
+```mermaid
+sequenceDiagram
+    participant Buyer
+    participant Middleware
+    participant Facilitator
+    participant App as Seller App
+
+    Buyer->>Middleware: Request protected route
+    Middleware-->>Buyer: 402 + WWW-Authenticate: Payment
+
+    alt charge
+        Buyer->>Buyer: Sign XRPL payment with invoiceId
+        Buyer->>Middleware: Retry with Authorization: Payment
+        Middleware->>Facilitator: POST /charge
+        Facilitator-->>Middleware: PaymentReceipt
+        Middleware->>App: Forward paid request
+        App-->>Buyer: 200 + Payment-Receipt
+    else session
+        Buyer->>Buyer: Sign XRPL prepay with sessionId
+        Buyer->>Middleware: Authorization: Payment (open)
+        Middleware->>Facilitator: POST /session
+        Facilitator-->>Middleware: Session receipt + sessionToken
+        Middleware->>App: Forward paid request
+        App-->>Buyer: 200 + Payment-Receipt
+        Note over Buyer,Facilitator: Later requests reuse sessionToken with use, top_up, and close actions
+    end
+```
 
 ## HTTP wire contract
 
@@ -47,6 +81,39 @@ xrpl-mpp pay https://merchant.example/premium --amount 0.001 --asset XRP --dry-r
 xrpl-mpp proxy https://merchant.example --port 8787
 xrpl-mpp mcp
 ```
+
+## Development Setup
+
+Install the whole monorepo for local development:
+
+```bash
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` installs all five packages in editable mode:
+
+- `-e ./packages/core`
+- `-e ./packages/facilitator`
+- `-e ./packages/middleware`
+- `-e ./packages/client`
+- `-e ./packages/payer`
+
+If you only want one package, install it directly from its package folder:
+
+```bash
+python -m pip install -e ./packages/core
+python -m pip install -e ./packages/facilitator
+python -m pip install -e ./packages/middleware
+python -m pip install -e ./packages/client
+python -m pip install -e ./packages/payer
+```
+
+The package directory names are `core`, `facilitator`, `middleware`, `client`,
+and `payer`, while the published package names are `xrpl-mpp-core`,
+`xrpl-mpp-facilitator`, `xrpl-mpp-middleware`, `xrpl-mpp-client`, and
+`xrpl-mpp-payer`.
 
 ## Verification
 

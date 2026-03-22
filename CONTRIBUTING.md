@@ -12,6 +12,17 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
 
+That dev requirements file installs every repo package in editable mode. If you
+only need one package locally, install it directly from its package folder:
+
+```bash
+pip install -e ./packages/core
+pip install -e ./packages/facilitator
+pip install -e ./packages/middleware
+pip install -e ./packages/client
+pip install -e ./packages/payer
+```
+
 Run the local test suite before opening a pull request:
 
 ```bash
