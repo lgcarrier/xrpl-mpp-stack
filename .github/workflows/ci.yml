@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r docs/requirements.txt
+
+      - name: Build docs site
+        run: mkdocs build --strict
+
   test:
     runs-on: ubuntu-latest
 
@@ -27,7 +48,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install -r docs/requirements.txt
 
       - name: Build package artifacts
         run: |
@@ -47,9 +67,6 @@ jobs:
 
       - name: Compile source files
         run: PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools
-
-      - name: Build docs site
-        run: mkdocs build --strict
 
       - name: Run pytest
         run: PYTHONPYCACHEPREFIX=/tmp/pycache pytest -q
