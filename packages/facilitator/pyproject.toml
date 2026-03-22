@@ -39,9 +39,8 @@ dependencies = [
 xrpl-mpp-facilitator = "xrpl_mpp_facilitator.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/lgcarrier/xrpl-mpp-stack"
 Documentation = "https://lgcarrier.github.io/xrpl-mpp-stack/packages/facilitator/"
-Repository = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Source = "https://github.com/lgcarrier/xrpl-mpp-stack/tree/main/packages/facilitator"
 Issues = "https://github.com/lgcarrier/xrpl-mpp-stack/issues"
 Changelog = "https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md"
 

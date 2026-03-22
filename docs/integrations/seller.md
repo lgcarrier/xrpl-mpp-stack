@@ -14,8 +14,13 @@ At minimum, a seller deployment needs:
 
 For a working reference implementation, see:
 
+- `examples/seller_minimal.py`
 - `examples/merchant_fastapi/app.py`
 - `docker-compose.yml`
+
+`examples/seller_minimal.py` is the smallest runnable charge example. The
+merchant FastAPI example adds the env-driven issued-asset pricing used by the
+full demo stack.
 
 ## Minimal Charge Route
 
@@ -53,6 +58,8 @@ async def premium(request: Request) -> dict[str, str]:
         "tx_hash": receipt.tx_hash or "",
     }
 ```
+
+That exact shape is runnable as `uvicorn examples.seller_minimal:app --reload --port 8010`.
 
 ## Minimal Session Route
 
@@ -157,7 +164,13 @@ require_payment(
 
 ## Local Verification
 
-Run the example merchant app:
+Run the minimal seller example:
+
+```bash
+uvicorn examples.seller_minimal:app --reload --port 8010
+```
+
+Run the fuller merchant demo app when you want the issued-asset env toggles:
 
 ```bash
 uvicorn examples.merchant_fastapi.app:app --reload --port 8010

@@ -227,6 +227,99 @@ def test_buyer_example_uses_mainnet_rpc_fallback_for_non_testnet_network(monkeyp
     assert buyer_example.rpc_url_from_env() == buyer_example.DEFAULT_MAINNET_RPC_URL
 
 
+def test_buyer_minimal_example_uses_base_url_asset_and_target_path_from_env(monkeypatch) -> None:
+    buyer_example = importlib.import_module("examples.buyer_minimal")
+    buyer_example = importlib.reload(buyer_example)
+
+    signer = buyer_example.XRPLPaymentSigner(
+        Wallet.create(),
+        network="xrpl:1",
+        autofill_enabled=False,
+    )
+    captured: dict[str, object] = {}
+
+    class DummyClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, path: str) -> httpx.Response:
+            captured["path"] = path
+            return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", path))
+
+    def fake_wrap_httpx_with_mpp_payment(
+        _signer,
+        *,
+        asset=None,
+        base_url=None,
+        transport=None,
+        **_kwargs,
+    ):
+        captured["asset"] = asset
+        captured["base_url"] = base_url
+        captured["transport"] = transport
+        return DummyClient()
+
+    monkeypatch.setenv("TARGET_BASE_URL", "http://merchant.local")
+    monkeypatch.setenv("TARGET_PATH", "/premium")
+    monkeypatch.setenv("PAYMENT_ASSET", "RLUSD:rRLUSDISSUER")
+    monkeypatch.setattr(
+        buyer_example,
+        "wrap_httpx_with_mpp_payment",
+        fake_wrap_httpx_with_mpp_payment,
+    )
+
+    response = asyncio.run(buyer_example.fetch_premium(signer=signer))
+
+    assert response.status_code == 200
+    assert captured["asset"] == "RLUSD:rRLUSDISSUER"
+    assert captured["base_url"] == "http://merchant.local"
+    assert captured["path"] == "/premium"
+
+
+def test_minimal_examples_round_trip_paid_response(monkeypatch) -> None:
+    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
+    monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
+    monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
+    monkeypatch.setenv("XRPL_NETWORK", "xrpl:1")
+    monkeypatch.setenv("PRICE_DROPS", "1000")
+    monkeypatch.setenv("MPP_CHALLENGE_SECRET", CHALLENGE_SECRET)
+
+    seller_example = importlib.import_module("examples.seller_minimal")
+    seller_example = importlib.reload(seller_example)
+    buyer_example = importlib.import_module("examples.buyer_minimal")
+    buyer_example = importlib.reload(buyer_example)
+
+    facilitator_client = FakeFacilitatorClient()
+    seller_app = seller_example.create_app(
+        client_factory=lambda _url, _token: facilitator_client,
+    )
+    signer = buyer_example.XRPLPaymentSigner(
+        Wallet.create(),
+        network="xrpl:1",
+        autofill_enabled=False,
+    )
+
+    async def _run() -> httpx.Response:
+        return await buyer_example.fetch_premium(
+            signer=signer,
+            base_url="http://merchant.local",
+            payment_asset="XRP:native",
+            transport=httpx.ASGITransport(app=seller_app),
+        )
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "premium content unlocked",
+        "payer": PAYER,
+        "tx_hash": TX_HASH,
+    }
+
+
 def test_buyer_example_loads_dotenv_from_current_working_directory(
     monkeypatch,
     tmp_path: Path,

@@ -26,3 +26,16 @@ def test_dev_requirements_install_all_packages_editable() -> None:
 
     for package_dir in PACKAGE_DIRS:
         assert f"-e ./packages/{package_dir}" in requirements_dev
+
+
+def test_each_package_exposes_pypi_project_urls() -> None:
+    for package_dir in PACKAGE_DIRS:
+        pyproject_path = PACKAGES_DIR / package_dir / "pyproject.toml"
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        urls = pyproject["project"]["urls"]
+
+        assert set(urls) == {"Documentation", "Source", "Issues", "Changelog"}
+        assert urls["Documentation"].endswith(f"/packages/{package_dir}/")
+        assert urls["Source"].endswith(f"/packages/{package_dir}")
+        assert urls["Issues"].endswith("/issues")
+        assert urls["Changelog"].endswith("/blob/main/CHANGELOG.md")

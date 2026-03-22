@@ -56,6 +56,7 @@ Before publishing:
 1. Update package versions in the relevant `packages/*/pyproject.toml` files if needed.
 2. Update [CHANGELOG.md](https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md).
 3. Confirm dependency ranges still match the release order you intend to publish.
+4. Confirm each package `project.urls` block still exposes `Documentation`, `Source`, `Issues`, and `Changelog`.
 
 ## Local Verification
 
@@ -160,6 +161,7 @@ After each PyPI publish:
 1. Install the package into a clean virtualenv.
 2. Verify the package smoke import or CLI.
 3. Confirm the package README renders correctly on the PyPI project page.
+4. Confirm the PyPI sidebar links resolve to the expected docs page, package source path, issue tracker, and changelog.
 
 Example clean install checks:
 

@@ -8,6 +8,10 @@ There are three main ways to integrate:
 - use `xrpl-mpp-payer` as an operator CLI or local proxy
 - use `xrpl-mpp-payer[mcp]` for local agent tooling
 
+For runnable references in this repo, use `examples/buyer_minimal.py` for the
+smallest app-level flow and `examples/buyer_httpx.py` for the fuller quickstart
+demo that auto-loads `.env`.
+
 ## Application Buyer With HTTPX
 
 The simplest application-level integration is `wrap_httpx_with_mpp_payment(...)`:
@@ -38,6 +42,8 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+That exact integration shape is runnable via `python -m examples.buyer_minimal`.
 
 That transport automatically:
 
@@ -138,6 +144,19 @@ python -m examples.buyer_httpx
 
 That script loads `.env` from the repo root when present and then pays the
 target route from `TARGET_URL`.
+
+### Minimal Buyer
+
+```bash
+XRPL_WALLET_SEED=replace-with-testnet-seed \
+XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/ \
+TARGET_BASE_URL=http://127.0.0.1:8010 \
+python -m examples.buyer_minimal
+```
+
+That example keeps the integration to one `wrap_httpx_with_mpp_payment(...)`
+call with `base_url` and `client.get("/premium")`, which matches the code shown
+earlier in this guide.
 
 ### Issued-Asset Demo
 

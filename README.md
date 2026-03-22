@@ -16,6 +16,25 @@ This repo migrates the original XRPL x402 stack onto the MPP HTTP model:
 - `xrpl-mpp-client`: HTTPX transport and signer for XRPL-backed MPP retries
 - `xrpl-mpp-payer`: CLI, proxy, and MCP payer runtime
 
+## Package chooser
+
+Pick the package for the role you are building. Most integrators start with
+`xrpl-mpp-middleware` on the seller side or `xrpl-mpp-client` on the buyer side,
+then add `xrpl-mpp-facilitator` as the settlement service.
+
+| Package | PyPI | Install | Use when |
+| --- | --- | --- | --- |
+| [Core](docs/packages/core.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-core?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-core/) | `pip install xrpl-mpp-core` | You need the shared MPP models, codecs, and XRPL asset helpers directly. |
+| [Facilitator](docs/packages/facilitator.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-facilitator?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-facilitator/) | `pip install xrpl-mpp-facilitator` | You are running the FastAPI settlement service behind protected seller routes. |
+| [Middleware](docs/packages/middleware.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-middleware?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-middleware/) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes that should return `402` until paid. |
+| [Client](docs/packages/client.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-client?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-client/) | `pip install xrpl-mpp-client` | You are building a buyer that signs XRPL payments and retries MPP challenges automatically. |
+| [Payer](docs/packages/payer.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-payer?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-payer/) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, or MCP support for agents. |
+
+For the smallest application-level references, start with
+`examples/seller_minimal.py` and `examples/buyer_minimal.py`. The fuller local
+demo stack remains `examples/merchant_fastapi/app.py`, `examples/buyer_httpx.py`,
+and `docker compose`.
+
 ## Supported intents
 
 - `charge`: one request, one XRPL payment
@@ -61,6 +80,23 @@ sequenceDiagram
 - successful paid responses use `Cache-Control: private`
 
 Seller-side `PaymentMiddlewareASGI` now rejects protected-route request bodies larger than `32768` bytes by default. Override that ceiling with `PaymentMiddlewareASGI(..., max_request_body_bytes=...)` when needed.
+
+## Minimal app examples
+
+Run the smallest seller example:
+
+```bash
+uvicorn examples.seller_minimal:app --reload --port 8010
+```
+
+Run the matching buyer example:
+
+```bash
+XRPL_WALLET_SEED=replace-with-testnet-seed \
+XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/ \
+TARGET_BASE_URL=http://127.0.0.1:8010 \
+python -m examples.buyer_minimal
+```
 
 ## Local demo
 

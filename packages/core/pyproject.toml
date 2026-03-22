@@ -27,9 +27,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lgcarrier/xrpl-mpp-stack"
 Documentation = "https://lgcarrier.github.io/xrpl-mpp-stack/packages/core/"
-Repository = "https://github.com/lgcarrier/xrpl-mpp-stack"
+Source = "https://github.com/lgcarrier/xrpl-mpp-stack/tree/main/packages/core"
 Issues = "https://github.com/lgcarrier/xrpl-mpp-stack/issues"
 Changelog = "https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md"
 

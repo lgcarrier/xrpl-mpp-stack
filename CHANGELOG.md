@@ -2,6 +2,12 @@
 
 All notable changes to the Open XRPL MPP Stack are documented here.
 
+## Unreleased
+
+- Added a README package chooser with live PyPI badges so GitHub visitors can pick the right package faster.
+- Added minimal seller and buyer examples that mirror the integration guides while preserving the fuller demo examples.
+- Standardized PyPI project links across all package metadata to expose `Documentation`, `Source`, `Issues`, and `Changelog`.
+
 ## xrpl-mpp-core 0.1.3
 
 - Accepted case-insensitive `Payment` auth schemes when parsing `WWW-Authenticate` and `Authorization` headers while keeping canonical header rendering as `Payment`.
