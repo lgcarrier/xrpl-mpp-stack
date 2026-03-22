@@ -8,7 +8,7 @@ copyright: >-
   <a href="https://github.com/lgcarrier/xrpl-mpp-stack" class="footer-badge-link">
     <img alt="GitHub xrpl-mpp-stack" src="https://img.shields.io/badge/GitHub-xrpl--mpp--stack-181717?logo=github&logoColor=white">
   </a>
-  <img alt="Docs version 0.1.0" src="https://img.shields.io/badge/docs-v0.1.0-0A7E3B">
+  <img alt="Docs version 0.1.3" src="https://img.shields.io/badge/docs-v0.1.3-0A7E3B">
 
 theme:
   name: material
@@ -35,6 +35,7 @@ extra_css:
 
 nav:
   - Home: index.md
+  - Configuration: configuration.md
   - Guided Quickstart:
       - Testnet XRP: quickstart/testnet-xrp.md
   - Asset Guides:
