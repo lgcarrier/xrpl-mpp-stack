@@ -24,19 +24,27 @@ endpoint into `.env.quickstart` as `XRPL_RPC_URL`. Override that selection with
 `XRPL_TESTNET_RPC_URL` or `python -m devtools.quickstart --xrpl-rpc-url ...` when
 you want to pin a specific provider.
 
+## Guides By Goal
+
+- Understand the stack layout: [Architecture Overview](architecture.md)
+- Protect seller routes: [Seller Integration](integrations/seller.md)
+- Build or operate a buyer: [Buyer Integration](integrations/buyer.md)
+- Choose the right environment settings: [Deployment Modes](configuration/deployment-modes.md)
+- Run XRP, RLUSD, or USDC demos: [Run Demo Variants](quickstart/demo-variants.md)
+
 ## Package Chooser
 
 Pick the package for the role you are building. Most integrators start with
 `xrpl-mpp-middleware` on the seller side or `xrpl-mpp-client` on the buyer side,
 then add `xrpl-mpp-facilitator` as the settlement service.
 
-| Package | Install | Use when |
-| --- | --- | --- |
-| [Core](packages/core.md) | `pip install xrpl-mpp-core` | You need the shared MPP models, codecs, and XRPL asset helpers directly. |
-| [Facilitator](packages/facilitator.md) | `pip install xrpl-mpp-facilitator` | You are running the FastAPI settlement service behind protected seller routes. |
-| [Middleware](packages/middleware.md) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes that should return `402` until paid. |
-| [Client](packages/client.md) | `pip install xrpl-mpp-client` | You are building a buyer that signs XRPL payments and retries MPP challenges automatically. |
-| [Payer](packages/payer.md) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, or MCP support for agents. |
+| Package | PyPI | Install | Use when |
+| --- | --- | --- | --- |
+| [Core](packages/core.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-core?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-core/) | `pip install xrpl-mpp-core` | You need the shared MPP models, codecs, and XRPL asset helpers directly. |
+| [Facilitator](packages/facilitator.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-facilitator?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-facilitator/) | `pip install xrpl-mpp-facilitator` | You are running the FastAPI settlement service behind protected seller routes. |
+| [Middleware](packages/middleware.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-middleware?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-middleware/) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes that should return `402` until paid. |
+| [Client](packages/client.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-client?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-client/) | `pip install xrpl-mpp-client` | You are building a buyer that signs XRPL payments and retries MPP challenges automatically. |
+| [Payer](packages/payer.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-payer?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-payer/) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, or MCP support for agents. |
 
 If you want the shortest path to a working stack, read the
 [middleware guide](packages/middleware.md), the [client guide](packages/client.md),
@@ -144,4 +152,6 @@ The exact wire format is documented in
 [Header Contract](how-it-works/header-contract.md). Replay protection, bounded
 ledger freshness, and session-state behavior are documented in
 [Replay And Freshness](how-it-works/replay-and-freshness.md). Integration guidance
-for MPP-native sellers and buyers lives in [MPP HTTP Integration](integrations/mpp-http.md).
+for MPP-native sellers and buyers lives in [Seller Integration](integrations/seller.md),
+[Buyer Integration](integrations/buyer.md), and
+[MPP HTTP Integration](integrations/mpp-http.md).

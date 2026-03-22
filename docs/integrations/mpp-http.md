@@ -23,3 +23,9 @@ Run `xrpl-mpp-facilitator` and point middleware routes at:
 - `POST /session`
 
 The facilitator validates XRPL-signed transactions and manages Redis-backed session state for the `session` intent.
+
+For end-to-end implementation guidance, continue to:
+
+- [Seller Integration](seller.md)
+- [Buyer Integration](buyer.md)
+- [Architecture Overview](../architecture.md)

@@ -120,3 +120,6 @@ the repo helpers instead of hardcoding issuer values by hand:
 - `ENABLE_API_DOCS=true` is best kept to local development or trusted internal environments.
 - `MPP_CHALLENGE_SECRET` should be shared between the middleware that emits challenges and the facilitator that validates them.
 - `redis_gateways` mode adds stricter `LastLedgerSequence` freshness checks. See [Replay And Freshness](how-it-works/replay-and-freshness.md) before enabling it on public traffic.
+
+For concrete examples grouped by deployment shape, continue to
+[Deployment Modes](configuration/deployment-modes.md).

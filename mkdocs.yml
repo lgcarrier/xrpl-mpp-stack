@@ -39,9 +39,13 @@ extra_css:
 
 nav:
   - Home: index.md
-  - Configuration: configuration.md
+  - Architecture: architecture.md
+  - Configuration:
+      - Environment Reference: configuration.md
+      - Deployment Modes: configuration/deployment-modes.md
   - Guided Quickstart:
       - Testnet XRP: quickstart/testnet-xrp.md
+      - Demo Variants: quickstart/demo-variants.md
   - Asset Guides:
       - RLUSD: asset-guides/rlusd.md
       - USDC: asset-guides/usdc.md
@@ -56,6 +60,8 @@ nav:
       - Header Contract: how-it-works/header-contract.md
       - Replay And Freshness: how-it-works/replay-and-freshness.md
   - Integrations:
+      - Seller Integration: integrations/seller.md
+      - Buyer Integration: integrations/buyer.md
       - MPP HTTP Integration: integrations/mpp-http.md
   - Troubleshooting: troubleshooting.md
   - Release:
