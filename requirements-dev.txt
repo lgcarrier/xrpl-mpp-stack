@@ -5,6 +5,6 @@
 -e ./packages/payer
 build>=1.2,<2
 editables>=0.5
-hatchling>=1.27
+hatchling>=1.29.0
 pytest==8.3.3
 twine>=5,<7
