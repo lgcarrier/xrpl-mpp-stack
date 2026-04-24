@@ -53,8 +53,9 @@ The main CI workflow runs on pushes, pull requests, manual dispatch, and a
 weekly scheduled run on `main`. The scheduled run is meant to catch packaging,
 docs, test, and Docker drift even when the repository is quiet.
 
-Dependabot checks GitHub Actions and Python dependency manifests weekly. Python
-updates cover the root, docs, and package manifests, while coordinated
+Dependabot checks GitHub Actions and Python dependency manifests weekly.
+Python dependency updates are grouped across the root, docs, and package
+manifests, while coordinated
 `xrpl-mpp-*` package dependency bumps stay manual through the release playbook.
 
 ## Package Releases

@@ -9,6 +9,7 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 - Standardized PyPI project links across all package metadata to expose `Documentation`, `Source`, `Issues`, and `Changelog`.
 - Added weekly scheduled CI and manual CI dispatch for routine maintenance checks.
 - Added Dependabot version-update coverage for GitHub Actions and Python manifests.
+- Grouped Python Dependabot updates to keep routine dependency PRs low-noise.
 
 ## xrpl-mpp-core 0.1.3
 

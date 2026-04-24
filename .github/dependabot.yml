@@ -38,6 +38,5 @@ updates:
       python-dependencies:
         patterns:
           - "*"
-        group-by: "dependency-name"
     ignore:
       - dependency-name: "xrpl-mpp-*"
