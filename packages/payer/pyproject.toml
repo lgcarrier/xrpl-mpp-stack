@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
   "httpx==0.28.1",
   "pydantic>=2,<3",
-  "starlette>=0.37,<1",
+  "starlette>=0.37,<2",
   "typer>=0.12,<1",
   "uvicorn>=0.30.6,<1",
   "xrpl-py==4.5.0",
