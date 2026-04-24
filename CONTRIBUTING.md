@@ -47,6 +47,16 @@ pip install -r docs/requirements.txt
 mkdocs build --strict
 ```
 
+## Routine Maintenance
+
+The main CI workflow runs on pushes, pull requests, manual dispatch, and a
+weekly scheduled run on `main`. The scheduled run is meant to catch packaging,
+docs, test, and Docker drift even when the repository is quiet.
+
+Dependabot checks GitHub Actions and Python dependency manifests weekly. Python
+updates cover the root, docs, and package manifests, while coordinated
+`xrpl-mpp-*` package dependency bumps stay manual through the release playbook.
+
 ## Package Releases
 
 This repo publishes five packages independently:

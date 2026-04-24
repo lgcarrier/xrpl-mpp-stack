@@ -7,6 +7,8 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 - Added a README package chooser with live PyPI badges so GitHub visitors can pick the right package faster.
 - Added minimal seller and buyer examples that mirror the integration guides while preserving the fuller demo examples.
 - Standardized PyPI project links across all package metadata to expose `Documentation`, `Source`, `Issues`, and `Changelog`.
+- Added weekly scheduled CI and manual CI dispatch for routine maintenance checks.
+- Added Dependabot version-update coverage for GitHub Actions and Python manifests.
 
 ## xrpl-mpp-core 0.1.3
 
