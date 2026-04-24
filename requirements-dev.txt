@@ -3,8 +3,8 @@
 -e ./packages/middleware
 -e ./packages/client
 -e ./packages/payer
-build>=1.2,<2
-editables>=0.5
-hatchling>=1.27
-pytest==8.3.3
-twine>=5,<7
+build>=1.4.4,<2
+editables>=0.6
+hatchling>=1.29.0
+pytest==9.0.3
+twine>=6.2.0,<7
