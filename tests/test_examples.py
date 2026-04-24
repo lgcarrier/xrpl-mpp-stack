@@ -383,6 +383,7 @@ def test_example_quickstart_flow_returns_paid_response(monkeypatch) -> None:
         response = await buyer_example.fetch_paid_resource(
             signer=signer,
             target_url="http://merchant.local/premium",
+            payment_asset="XRP:native",
             transport=httpx.ASGITransport(app=merchant_app),
         )
         return response
