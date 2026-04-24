@@ -49,7 +49,7 @@ GitHub environments used by the workflow:
 
 Current release line:
 
-- `0.1.3` for all five packages
+- `0.1.4` for all five packages
 
 Before publishing:
 
@@ -120,11 +120,11 @@ TestPyPI installs should use PyPI as an extra index for shared dependencies:
 python3.12 -m venv /tmp/xrpl-mpp-testpypi
 source /tmp/xrpl-mpp-testpypi/bin/activate
 pip install --upgrade pip
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-core==0.1.3
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-facilitator==0.1.3
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-middleware==0.1.3
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-client==0.1.3
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "xrpl-mpp-payer[mcp]==0.1.3"
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-core==0.1.4
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-facilitator==0.1.4
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-middleware==0.1.4
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-client==0.1.4
+pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "xrpl-mpp-payer[mcp]==0.1.4"
 ```
 
 ## Production Publish
@@ -132,24 +132,24 @@ pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://
 After TestPyPI succeeds, publish in this order:
 
 ```bash
-git tag core-v0.1.3
-git push origin core-v0.1.3
+git tag core-v0.1.4
+git push origin core-v0.1.4
 ```
 
 Wait for index availability, then publish the remaining packages:
 
 ```bash
-git tag facilitator-v0.1.3
-git push origin facilitator-v0.1.3
+git tag facilitator-v0.1.4
+git push origin facilitator-v0.1.4
 
-git tag middleware-v0.1.3
-git push origin middleware-v0.1.3
+git tag middleware-v0.1.4
+git push origin middleware-v0.1.4
 
-git tag client-v0.1.3
-git push origin client-v0.1.3
+git tag client-v0.1.4
+git push origin client-v0.1.4
 
-git tag payer-v0.1.3
-git push origin payer-v0.1.3
+git tag payer-v0.1.4
+git push origin payer-v0.1.4
 ```
 
 The publish workflow fails if the tag version and the package `version` field do not match.
@@ -169,9 +169,9 @@ Example clean install checks:
 python3.12 -m venv /tmp/xrpl-mpp-pypi
 source /tmp/xrpl-mpp-pypi/bin/activate
 pip install --upgrade pip
-pip install xrpl-mpp-core==0.1.3
-pip install xrpl-mpp-facilitator==0.1.3
-pip install xrpl-mpp-middleware==0.1.3
-pip install xrpl-mpp-client==0.1.3
-pip install "xrpl-mpp-payer[mcp]==0.1.3"
+pip install xrpl-mpp-core==0.1.4
+pip install xrpl-mpp-facilitator==0.1.4
+pip install xrpl-mpp-middleware==0.1.4
+pip install xrpl-mpp-client==0.1.4
+pip install "xrpl-mpp-payer[mcp]==0.1.4"
 ```

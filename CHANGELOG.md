@@ -4,12 +4,41 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 
 ## Unreleased
 
+No changes yet.
+
+## Stack 0.1.4
+
 - Added a README package chooser with live PyPI badges so GitHub visitors can pick the right package faster.
 - Added minimal seller and buyer examples that mirror the integration guides while preserving the fuller demo examples.
+- Expanded the hosted architecture, configuration, integration, and quickstart documentation.
 - Standardized PyPI project links across all package metadata to expose `Documentation`, `Source`, `Issues`, and `Changelog`.
 - Added weekly scheduled CI and manual CI dispatch for routine maintenance checks.
 - Added Dependabot version-update coverage for GitHub Actions and Python manifests.
 - Grouped Python Dependabot updates to keep routine dependency PRs low-noise.
+- Updated GitHub Actions and Python dependency manifests through grouped Dependabot maintenance PRs.
+
+## xrpl-mpp-core 0.1.4
+
+- Aligned the package with the coordinated `0.1.4` stack release.
+
+## xrpl-mpp-facilitator 0.1.4
+
+- Updated FastAPI, pydantic-settings, python-dotenv, Redis, and structlog dependency pins for the coordinated `0.1.4` stack release.
+- Raised the `xrpl-mpp-core` dependency floor to `0.1.4`.
+
+## xrpl-mpp-middleware 0.1.4
+
+- Expanded Starlette compatibility to allow `1.x` releases below `2.0`.
+- Raised the `xrpl-mpp-core` dependency floor to `0.1.4`.
+
+## xrpl-mpp-client 0.1.4
+
+- Raised the `xrpl-mpp-core` dependency floor to `0.1.4`.
+
+## xrpl-mpp-payer 0.1.4
+
+- Expanded Starlette compatibility to allow `1.x` releases below `2.0`.
+- Raised the `xrpl-mpp-client` and `xrpl-mpp-core` dependency floors to `0.1.4`.
 
 ## xrpl-mpp-core 0.1.3
 
