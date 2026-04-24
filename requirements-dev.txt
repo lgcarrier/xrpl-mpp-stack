@@ -6,5 +6,5 @@
 build>=1.2,<2
 editables>=0.5
 hatchling>=1.27
-pytest==8.3.3
+pytest==9.0.3
 twine>=5,<7
