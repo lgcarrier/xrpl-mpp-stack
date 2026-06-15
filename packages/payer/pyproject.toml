@@ -28,7 +28,7 @@ dependencies = [
   "starlette>=0.37,<2",
   "typer>=0.12,<1",
   "uvicorn>=0.30.6,<1",
-  "xrpl-py==4.5.0",
+  "xrpl-py==5.0.0",
   "xrpl-mpp-client>=0.1.4,<0.2.0",
   "xrpl-mpp-core>=0.1.4,<0.2.0",
 ]
