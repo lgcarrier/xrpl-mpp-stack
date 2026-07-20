@@ -24,14 +24,14 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "fastapi==0.136.1",
-  "pydantic-settings==2.14.0",
+  "fastapi==0.139.2",
+  "pydantic-settings==2.14.2",
   "python-dotenv==1.2.2",
-  "redis==7.4.0",
-  "slowapi==0.1.9",
-  "structlog==25.5.0",
+  "redis==8.0.1",
+  "slowapi==0.1.10",
+  "structlog==26.1.0",
   "uvicorn>=0.30.6,<1",
-  "xrpl-py==4.5.0",
+  "xrpl-py==5.0.0",
   "xrpl-mpp-core>=0.1.4,<0.2.0",
 ]
 
