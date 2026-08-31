@@ -6,30 +6,32 @@ from pathlib import Path
 
 import pytest
 from xrpl.wallet import Wallet
+from xrpl_mpp_core import IssuedCurrency, serialize_currency, xrpl_currency_code
 
 import devtools.demo_rebalance as demo_rebalance
 from devtools.live_testnet_support import DemoWalletSet
 
 
 def write_env(path: Path, *, merchant: str, buyer_seed: str, asset_code: str, issuer: str = "") -> None:
+    currency = (
+        serialize_currency(
+            IssuedCurrency(currency=xrpl_currency_code(asset_code), issuer=issuer)
+        )
+        if issuer
+        else "XRP"
+    )
     path.write_text(
         "\n".join(
             [
                 "XRPL_RPC_URL=https://resolved.testnet.rpc/",
-                "NETWORK_ID=xrpl:1",
-                "XRPL_NETWORK=xrpl:1",
+                "NETWORK_ID=testnet",
+                "XRPL_NETWORK=testnet",
                 f"MY_DESTINATION_ADDRESS={merchant}",
                 "FACILITATOR_BEARER_TOKEN=test-token",
                 f"XRPL_WALLET_SEED={buyer_seed}",
-                "PRICE_DROPS=1000",
-                f"PRICE_ASSET_CODE={asset_code}",
-                f"PRICE_ASSET_ISSUER={issuer}",
-                "PRICE_ASSET_AMOUNT=1.25",
-                (
-                    f"PAYMENT_ASSET={asset_code}:{issuer}"
-                    if issuer
-                    else "PAYMENT_ASSET=XRP:native"
-                ),
+                "PRICE_AMOUNT=1.25" if issuer else "PRICE_AMOUNT=1000",
+                f"PRICE_CURRENCY={currency}",
+                f"PAYMENT_CURRENCY={currency}",
                 "ALLOWED_ISSUED_ASSETS=",
                 "",
             ]
@@ -101,7 +103,7 @@ def test_rebalance_rlusd_asset_transfers_full_merchant_balance_to_buyer(monkeypa
         object(),
         merchant_wallet=merchant_wallet,
         buyer_wallet=buyer_wallet,
-        issuer="rRLUSDIssuer",
+        issuer="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
     )
 
     assert moved_amount == Decimal("4.5")
@@ -256,14 +258,14 @@ def test_rebalance_contract_assets_dispatches_from_contract_envs(monkeypatch, tm
         merchant=wallets.merchant_wallet.classic_address,
         buyer_seed=(wallets.buyer_wallet("rlusd").seed or ""),
         asset_code="RLUSD",
-        issuer="rRLUSDIssuer",
+        issuer="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
     )
     write_env(
         usdc_env,
         merchant=wallets.merchant_wallet.classic_address,
         buyer_seed=(wallets.buyer_wallet("usdc").seed or ""),
         asset_code="USDC",
-        issuer="rUSDCTestIssuer",
+        issuer="rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
     )
     write_contract(contract_path, xrp_env=xrp_env, rlusd_env=rlusd_env, usdc_env=usdc_env)
 
@@ -281,13 +283,13 @@ def test_rebalance_contract_assets_dispatches_from_contract_envs(monkeypatch, tm
     def fake_rebalance_rlusd(_client, *, merchant_wallet, buyer_wallet, issuer):
         calls.append(("RLUSD", buyer_wallet.classic_address))
         assert merchant_wallet.classic_address == wallets.merchant_wallet.classic_address
-        assert issuer == "rRLUSDIssuer"
+        assert issuer == "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
         return Decimal("3.75"), "rlusd-tx"
 
     def fake_rebalance_usdc(_client, *, merchant_wallet, buyer_wallet, issuer):
         calls.append(("USDC", buyer_wallet.classic_address))
         assert merchant_wallet.classic_address == wallets.merchant_wallet.classic_address
-        assert issuer == "rUSDCTestIssuer"
+        assert issuer == "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
         return Decimal("4.5"), "usdc-tx"
 
     monkeypatch.setattr(demo_rebalance, "rebalance_xrp_asset", fake_rebalance_xrp)
@@ -349,14 +351,14 @@ def test_rebalance_contract_assets_rejects_merchant_mismatch(monkeypatch, tmp_pa
         merchant=wrong_merchant,
         buyer_seed=(wallets.buyer_wallet("rlusd").seed or ""),
         asset_code="RLUSD",
-        issuer="rRLUSDIssuer",
+        issuer="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
     )
     write_env(
         usdc_env,
         merchant=wrong_merchant,
         buyer_seed=(wallets.buyer_wallet("usdc").seed or ""),
         asset_code="USDC",
-        issuer="rUSDCTestIssuer",
+        issuer="rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
     )
     write_contract(contract_path, xrp_env=xrp_env, rlusd_env=rlusd_env, usdc_env=usdc_env)
 
@@ -392,7 +394,7 @@ def test_rebalance_contract_assets_rejects_buyer_mismatch(
         merchant=wallets.merchant_wallet.classic_address,
         buyer_seed=wrong_buyer.seed or "",
         asset_code=asset_symbol,
-        issuer="rRLUSDIssuer" if asset_symbol == "RLUSD" else "",
+        issuer="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe" if asset_symbol == "RLUSD" else "",
     )
     contract_path.write_text(
         json.dumps(

@@ -9,7 +9,7 @@ import shutil
 import typer
 
 from xrpl_mpp_payer.payer import budget_status as get_budget_status
-from xrpl_mpp_payer.payer import format_pay_result, get_receipts, pay_with_mpp
+from xrpl_mpp_payer.payer import close_with_mpp, format_pay_result, get_receipts, pay_with_mpp
 from xrpl_mpp_payer.proxy import run_proxy
 
 app = typer.Typer(help="XRPL MPP payer CLI")
@@ -23,11 +23,31 @@ def pay(
     amount: float = typer.Option(0.001, help="Default spend cap in asset units"),
     asset: str = typer.Option("XRP", help="Asset code to pay with"),
     issuer: str | None = typer.Option(None, help="Issuer for issued assets"),
-    max_spend: float | None = typer.Option(None, help="Explicit spend cap override"),
+    max_spend: float | None = typer.Option(
+        None,
+        help="Per-call spend cap, bounded by XRPL_MPP_MAX_SPEND",
+    ),
     dry_run: bool = typer.Option(False, help="Preview the request without signing or retrying"),
+    intent: str | None = typer.Option(None, help="Select charge or session"),
+    channel_id: str | None = typer.Option(None, help="Existing PayChannel ledger id"),
+    cumulative_amount: str = typer.Option("0", help="Current cumulative PayChannel drops"),
+    open_transaction: str | None = typer.Option(
+        None,
+        help="Signed PaymentChannelCreate blob for an open challenge",
+    ),
+    channel_funding_amount: str | None = typer.Option(
+        None,
+        help="PayChannel funding amount in drops (creates a signed open transaction)",
+    ),
+    recipient: str | None = typer.Option(
+        None,
+        help="Operator-approved payment recipient",
+    ),
 ) -> None:
     """Pay for a URL using XRPL MPP."""
 
+    if intent not in {None, "charge", "session"}:
+        raise typer.BadParameter("intent must be charge or session")
     result = asyncio.run(
         pay_with_mpp(
             url=url,
@@ -36,6 +56,34 @@ def pay(
             issuer=issuer,
             max_spend=max_spend,
             dry_run=dry_run,
+            intent=intent,
+            channel_id=channel_id,
+            cumulative_amount=cumulative_amount,
+            open_transaction=open_transaction,
+            channel_funding_amount=channel_funding_amount,
+            expected_recipient=recipient,
+        )
+    )
+    typer.echo(format_pay_result(result))
+
+
+@app.command("close")
+def close_paychannel(
+    url: str,
+    channel_id: str = typer.Option(..., help="PayChannel ledger id"),
+    cumulative_amount: str = typer.Option("0", help="Current cumulative PayChannel drops"),
+    max_spend: float | None = typer.Option(None, help="Maximum final increment in XRP"),
+    recipient: str | None = typer.Option(None, help="Operator-approved channel recipient"),
+) -> None:
+    """Send a final cumulative PayChannel voucher for a protected URL."""
+
+    result = asyncio.run(
+        close_with_mpp(
+            url=url,
+            channel_id=channel_id,
+            cumulative_amount=cumulative_amount,
+            max_spend=max_spend,
+            expected_recipient=recipient,
         )
     )
     typer.echo(format_pay_result(result))
@@ -49,11 +97,22 @@ def proxy(
     amount: float = typer.Option(0.001, help="Default spend cap in asset units"),
     asset: str = typer.Option("XRP", help="Asset code to pay with"),
     issuer: str | None = typer.Option(None, help="Issuer for issued assets"),
-    max_spend: float | None = typer.Option(None, help="Explicit spend cap override"),
+    max_spend: float | None = typer.Option(
+        None,
+        help="Per-call spend cap, bounded by XRPL_MPP_MAX_SPEND",
+    ),
     dry_run: bool = typer.Option(False, help="Preview proxy requests without paying"),
+    intent: str | None = typer.Option(None, help="Select charge or session"),
+    channel_id: str | None = typer.Option(None, help="Existing PayChannel ledger id"),
+    cumulative_amount: str = typer.Option("0", help="Current cumulative PayChannel drops"),
+    open_transaction: str | None = typer.Option(None, help="Signed PaymentChannelCreate blob"),
+    channel_funding_amount: str | None = typer.Option(None, help="PayChannel funding drops"),
+    recipient: str | None = typer.Option(None, help="Operator-approved payment recipient"),
 ) -> None:
     """Run the local MPP auto-pay forward proxy."""
 
+    if intent not in {None, "charge", "session"}:
+        raise typer.BadParameter("intent must be charge or session")
     run_proxy(
         target_base_url=target_base_url,
         host=host,
@@ -63,6 +122,12 @@ def proxy(
         issuer=issuer,
         max_spend=max_spend,
         dry_run=dry_run,
+        intent=intent,
+        channel_id=channel_id,
+        cumulative_amount=cumulative_amount,
+        open_transaction=open_transaction,
+        channel_funding_amount=channel_funding_amount,
+        expected_recipient=recipient,
     )
 
 
@@ -91,7 +156,7 @@ def receipts(limit: int = typer.Option(10, help="Maximum receipts to show")) -> 
         return
     for receipt in receipts:
         typer.echo(
-            f"{receipt['url']} -> {receipt['amount']} {receipt['asset_identifier']} ({receipt['tx_hash']})"
+            f"{receipt['url']} -> {receipt['amount']} {receipt['currency']} ({receipt['reference']})"
         )
 
 
@@ -107,7 +172,7 @@ def budget(
 
 @app.command()
 def mcp(stdio: bool = True) -> None:
-    """Run the official XRPL MPP MCP server for local agents."""
+    """Run the optional payer-agent MCP server."""
 
     if stdio:
         importlib.import_module("xrpl_mpp_payer.mcp").main()

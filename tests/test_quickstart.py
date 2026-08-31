@@ -23,15 +23,20 @@ def test_render_quickstart_env_contains_expected_values() -> None:
 
     assert f"MY_DESTINATION_ADDRESS={merchant_wallet.classic_address}" in rendered
     assert f"XRPL_WALLET_SEED={buyer_wallet.seed}" in rendered
+    assert f"XRPL_MPP_EXPECTED_RECIPIENT={merchant_wallet.classic_address}" in rendered
+    assert "XRPL_MPP_MAX_SPEND=0.0025" in rendered
     assert "FACILITATOR_BEARER_TOKEN=quickstart-token" in rendered
     assert "REDIS_URL=redis://127.0.0.1:6379/0" in rendered
     assert "MPP_CHALLENGE_SECRET=quickstart-mpp-secret" in rendered
     assert "MPP_CHALLENGE_TTL_SECONDS=300" in rendered
-    assert "SESSION_IDLE_TIMEOUT_SECONDS=900" in rendered
-    assert "SESSION_STATE_TTL_SECONDS=604800" in rendered
     assert "XRPL_RPC_URL=https://resolved.testnet.rpc/" in rendered
-    assert "PRICE_DROPS=2500" in rendered
-    assert "PAYMENT_ASSET=XRP:native" in rendered
+    assert "NETWORK_ID=testnet" in rendered
+    assert "XRPL_NETWORK=testnet" in rendered
+    assert "PRICE_AMOUNT=2500" in rendered
+    assert "PRICE_CURRENCY=XRP" in rendered
+    assert "PAYMENT_CURRENCY=XRP" in rendered
+    assert "SESSION_IDLE_TIMEOUT_SECONDS" not in rendered
+    assert "SESSION_STATE_TTL_SECONDS" not in rendered
 
 
 def test_mask_secret_preserves_prefix_and_redacts_remaining_characters() -> None:
@@ -83,6 +88,7 @@ def test_quickstart_main_writes_env_file_and_prints_commands(
     assert output_path.read_text(encoding="utf-8")
     assert "Wrote" in captured.out
     assert "docker compose --env-file" in captured.out
+    assert "--profile demo run --rm buyer" in captured.out
     assert str(output_path) in captured.out
     assert f"Buyer address: {buyer_wallet.classic_address}" in captured.out
     assert (

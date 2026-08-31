@@ -1,65 +1,34 @@
-# RLUSD Guide
+# RLUSD
 
-Use this after the [Testnet XRP quickstart](../quickstart/testnet-xrp.md) is already working.
+RLUSD is an XRPL issued currency. Its MPP 0.2 currency value is the canonical
+JSON serialization of:
 
-## What This Guide Covers
+```json
+{
+  "currency": "RLUSD",
+  "issuer": "rIssuerForTheSelectedNetwork"
+}
+```
 
-- creating or recovering the disposable RLUSD claim wallet
-- claiming RLUSD with the existing helper flow
-- switching the merchant and buyer demo from XRP to RLUSD
+Do not use the former `RLUSD:rIssuer` shorthand on the 0.2 wire.
 
 ## Prerequisites
 
-- the XRP quickstart has completed successfully
-- you have a `TRYRLUSD_SESSION_TOKEN` for the RLUSD faucet flow
+- Verify the issuer for the selected network from an authoritative source.
+- Establish a trust line from the payer account.
+- Fund the payer with the issued asset and enough XRP for ledger fees/reserve.
+- Add the exact currency/issuer pair to the facilitator's issued-asset allowlist.
+- Configure both buyer and seller for the same named network.
 
-Export the session token:
+The built-in network constants are conveniences, not a substitute for checking
+the currently intended issuer before moving value.
 
-```bash
-export TRYRLUSD_SESSION_TOKEN=...
-```
+## Exact amount checks
 
-Then run the helper:
+Issued amounts use decimal strings and XRPL issued-amount semantics. The signer
+serializes the ledger amount; the facilitator compares currency, issuer, and
+numeric value and rejects partial payments. Avoid binary floating-point values
+in application pricing.
 
-```bash
-python -m devtools.rlusd_topup
-```
-
-The helper will:
-
-- reuse the cached shared merchant wallet and the dedicated RLUSD buyer wallet
-- create or recover a disposable RLUSD claim wallet
-- create the RLUSD trustline
-- attempt the faucet claim when the session and cooldown allow it
-- sweep claimed RLUSD back into the canonical wallet when possible
-- fund the dedicated RLUSD buyer wallet after recovery so the RLUSD demo signs with the same wallet it was funded for
-
-If the helper reports a pending or rate-limited claim, rerun it later.
-
-## Switch The Demo To RLUSD
-
-Generate a derived env file:
-
-```bash
-python -m devtools.demo_env --asset rlusd
-```
-
-That writes `.env.quickstart.rlusd` with the RLUSD merchant pricing, buyer asset selection,
-the RLUSD buyer seed, and any facilitator-side `ALLOWED_ISSUED_ASSETS` entry
-needed for the chosen issuer.
-
-Then restart the stack and rerun the buyer:
-
-```bash
-docker compose --env-file .env.quickstart.rlusd up --build
-docker compose --env-file .env.quickstart.rlusd --profile demo run --rm buyer
-```
-
-The merchant example will price `/premium` in RLUSD, and the buyer example will select the matching issued-asset payment option.
-
-## Notes
-
-- The default Testnet RLUSD issuer can be overridden with `XRPL_TESTNET_RLUSD_ISSUER`.
-- Claim state is stored under `.live-test-wallets/rlusd-claim-state.json`.
-- The helper manages trustline cleanup and account deletion for disposable claim wallets when the ledger allows it.
-- The RLUSD buyer wallet is separate from the XRP and USDC buyers so those demo runs can sign in parallel.
+Wallet funding is distinct from an MPP PaymentChannel or session action. A
+faucet/helper transfer only prepares the payer's ledger balance.

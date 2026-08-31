@@ -1,116 +1,73 @@
-# Guided Quickstart: Testnet XRP
+# Testnet XRP quickstart
 
-This is the fastest real end-to-end path:
+This path exercises a one-time `xrpl` / `charge` exchange. Use disposable
+Testnet wallets only.
 
-1. generate or reuse XRPL Testnet wallets
-2. write a local `.env.quickstart` file
-3. run the facilitator and merchant with Docker Compose
-4. have the buyer example pay for a protected route with XRP
-
-## Prerequisites
-
-- Python `3.12`
-- Docker Desktop or Docker Engine with Compose
-- outbound network access to XRPL Testnet
-
-## Setup
-
-Create a virtualenv and install the repo dependencies:
+## Install
 
 ```bash
 python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+cp .env.example .env
 ```
 
-Generate the quickstart env file:
+## Configure
+
+Set these values in `.env`:
+
+```dotenv
+NETWORK_ID=testnet
+XRPL_NETWORK=testnet
+XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/
+MY_DESTINATION_ADDRESS=rSellerTestnetAddress
+MERCHANT_XRPL_ADDRESS=rSellerTestnetAddress
+FACILITATOR_BEARER_TOKEN=replace-with-a-random-gateway-token
+MPP_CHALLENGE_SECRET=replace-with-a-long-random-challenge-key
+REDIS_URL=redis://127.0.0.1:6379/0
+XRPL_WALLET_SEED=sBuyerTestnetSeed
+XRPL_MPP_EXPECTED_RECIPIENT=rSellerTestnetAddress
+XRPL_MPP_MAX_SPEND=0.001
+PAYMENT_CURRENCY=XRP
+PRICE_AMOUNT=1000
+PRICE_CURRENCY=XRP
+```
+
+The payer account needs enough Testnet XRP for the exact amount and network
+fee. The destination must match the seller and facilitator configuration.
+
+## Run
+
+Start Redis, the facilitator, and the merchant through the development Compose
+profile:
 
 ```bash
-python -m devtools.quickstart
+docker compose up --build redis facilitator merchant
 ```
 
-If you need to pin the Testnet RPC used during wallet generation, either export
-`XRPL_TESTNET_RPC_URL` first or pass `--xrpl-rpc-url https://your-testnet-rpc.example/`.
-
-That command:
-
-- creates or reuses a cached shared merchant wallet plus dedicated buyer wallets for XRP, RLUSD, and USDC
-- writes `.env.quickstart`
-- auto-selects a healthy public XRPL Testnet RPC and writes it into `.env.quickstart` as `XRPL_RPC_URL`
-- prints the merchant address, the XRP buyer address, redacted secret previews, and the exact next commands
-
-The generated file contains secrets and is ignored by git. Do not commit it.
-
-## Run The Stack
-
-Start the facilitator, merchant, and Redis:
+Then run the trace buyer in another terminal:
 
 ```bash
-docker compose --env-file .env.quickstart up --build
+docker compose --profile demo run --rm buyer
 ```
 
-In a second terminal, trigger the paid request:
+The Compose merchant explicitly opts into unencrypted HTTP for its private
+container-to-container facilitator hop. The seller examples permit plaintext
+only for a literal loopback facilitator; their normal client requires HTTPS for
+every remote origin. Do not translate this development command into a
+plaintext production deployment.
+
+The buyer first receives `402`, signs the authoritative challenge, retries once,
+and prints the unlocked response. Inspect the returned `Payment-Receipt` only on
+the successful response.
+
+## Verify the full live path
+
+The external-network test is not part of normal `pytest`:
 
 ```bash
-docker compose --env-file .env.quickstart --profile demo run --rm buyer
+RUN_XRPL_TESTNET_LIVE=1 pytest -m live tests/integration/test_live_testnet.py -s
 ```
 
-Expected output:
-
-```text
-status=200
-{"message":"premium content unlocked", ...}
-```
-
-## Full AI Agent Support
-
-Once the quickstart stack is running, you can use the payer package as a local agent bridge:
-
-```bash
-pip install "xrpl-mpp-payer[mcp]"
-xrpl-mpp skill install
-xrpl-mpp mcp
-```
-
-Claude Desktop can register it directly:
-
-```bash
-claude mcp add xrpl-mpp-payer -- xrpl-mpp mcp
-```
-
-That lets local agents call `pay_url` directly instead of shelling out to a buyer script.
-
-## What Happened
-
-- the merchant challenged the first request with `402 Payment Required`
-- the buyer decoded `WWW-Authenticate: Payment`, signed an exact XRP payment, and retried once
-- the facilitator verified and settled the presigned transaction
-- the middleware injected `request.state.mpp_payment` and returned the protected content
-
-## Useful Files
-
-- `.env.quickstart`
-- `.live-test-wallets/xrpl-testnet-wallets.json`
-- `examples/merchant_fastapi/app.py`
-- `examples/buyer_httpx.py`
-
-## Clean Up
-
-Stop the stack with `Ctrl+C`, or run:
-
-```bash
-docker compose --env-file .env.quickstart down
-```
-
-You can reuse `.env.quickstart` and the cached wallets the next time you run the demo.
-The derived `.env.quickstart.rlusd` and `.env.quickstart.usdc` files will each
-use their own buyer wallet seed, so the three demo variants can sign in
-parallel without sequence-number contention.
-
-## Next Steps
-
-- Generate `.env.quickstart.rlusd` with `python -m devtools.demo_env --asset rlusd`
-- Generate `.env.quickstart.usdc` with `python -m devtools.demo_env --asset usdc`
-- Follow the [RLUSD guide](../asset-guides/rlusd.md)
-- Follow the [USDC guide](../asset-guides/usdc.md)
-- Read [Payment Flow](../how-it-works/payment-flow.md)
+Faucets and public RPC endpoints can be temporarily unavailable. A skipped or
+blocked live test does not replace the deterministic local suite.

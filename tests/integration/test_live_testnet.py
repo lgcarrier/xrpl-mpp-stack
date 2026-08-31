@@ -1,28 +1,30 @@
+"""Opt-in XRPL Testnet verification for MPP 0.2 settlement paths.
+
+Charge and PayChannel round trips remain gated by ``RUN_XRPL_TESTNET_LIVE=1``;
+the default suite never submits an XRPL transaction.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import os
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
+import os
+from time import sleep
+from typing import Callable
 
 from fastapi import FastAPI, Request
 import httpx
 import pytest
 from slowapi import Limiter as SlowLimiter
 from xrpl.clients import JsonRpcClient
-from xrpl.models.requests import Tx
+from xrpl.models.requests import AccountChannels, Tx
+from xrpl.models.transactions import PaymentChannelClaim, PaymentChannelClaimFlag
+from xrpl.transaction import submit_and_wait
 from xrpl.wallet import Wallet
 
 import xrpl_mpp_facilitator.factory as factory_module
-from xrpl_mpp_client import (
-    XRPLPaymentSigner,
-    XRPLPaymentTransport,
-    build_payment_authorization,
-    decode_payment_challenges_response,
-    decode_payment_receipt_header,
-)
-from xrpl_mpp_core import USDC_TESTNET_ISSUER, decode_challenge_request, normalize_currency_code
-from xrpl_mpp_facilitator.config import Settings
-from xrpl_mpp_facilitator.factory import create_app
-from xrpl_mpp_facilitator.xrpl_service import XRPLService
-from xrpl_mpp_middleware import PaymentMiddlewareASGI, XRPLFacilitatorClient, require_payment, require_session
 from devtools.live_testnet_support import (
     DEFAULT_RLUSD_TESTNET_ISSUER,
     DEFAULT_USDC_TESTNET_ISSUER,
@@ -31,8 +33,6 @@ from devtools.live_testnet_support import (
     RLUSD_TESTNET_ISSUER_ENV,
     USDC_TESTNET_ISSUER_ENV,
     LiveWalletPair,
-    consolidate_rlusd_to_wallet_a,
-    consolidate_usdc_to_wallet_a,
     ensure_rlusd_trustline,
     ensure_usdc_trustline,
     get_demo_wallet_set,
@@ -46,648 +46,692 @@ from devtools.live_testnet_support import (
     wallet_cache_path,
 )
 from tests.fakes import FakeRedis
+from xrpl_mpp_client import (
+    XRPLPaymentPolicy,
+    XRPLPaymentSigner,
+    XRPLPaymentTransport,
+    build_payment_authorization,
+    decode_payment_challenges_response,
+    decode_payment_receipt_header,
+)
+from xrpl_mpp_core import (
+    IssuedCurrency,
+    PaymentReceipt,
+    XRPLChargeRequest,
+    challenge_invoice_id,
+    decode_challenge_request,
+    normalize_currency_code,
+    serialize_currency,
+    xrpl_currency_code,
+)
+from xrpl_mpp_facilitator.config import Settings
+from xrpl_mpp_facilitator.factory import create_app
+from xrpl_mpp_facilitator.xrpl_service import XRPLService
+from xrpl_mpp_middleware import (
+    ChargeRouteSpec,
+    PaymentMiddlewareASGI,
+    RouteConfig,
+    SessionRouteSpec,
+    XRPLFacilitatorClient,
+)
 
 XRP_PAYMENT_DROPS = 2_000_000
 RLUSD_PAYMENT_VALUE = Decimal("3.75")
 USDC_PAYMENT_VALUE = Decimal("4.5")
 LIVE_TEST_BEARER_TOKEN = "live-test-facilitator-token"
 LIVE_TEST_CHALLENGE_SECRET = "live-test-mpp-challenge-secret"
-FACILITATOR_BASE_URL = "http://facilitator.local"
-MERCHANT_BASE_URL = "http://merchant.local"
-SESSION_UNIT_DROPS = 250
-SESSION_MIN_PREPAY_DROPS = 1000
+FACILITATOR_BASE_URL = "https://facilitator.local"
+MERCHANT_BASE_URL = "http://127.0.0.1"
+PAYCHANNEL_FUNDING_DROPS = "1000000"
+PAYCHANNEL_UNIT_DROPS = 250
+# Keep the opt-in cleanup bounded. Production defaults and examples retain the
+# one-hour safety window; this live test explicitly configures the facilitator
+# to accept a one-second channel before exercising the funder's close lifecycle.
+PAYCHANNEL_SETTLE_DELAY = 1
+TF_CLOSE = PaymentChannelClaimFlag.TF_CLOSE.value
+LIVE_SKIP = pytest.mark.skipif(
+    os.environ.get(LIVE_TEST_FLAG) != "1",
+    reason=f"Set {LIVE_TEST_FLAG}=1 to run the XRPL Testnet live integration test.",
+)
 
 
-def _build_live_test_facilitator_app(app_settings: Settings) -> FastAPI:
-    redis_client = FakeRedis()
-    xrpl_service = XRPLService(app_settings, redis_client=redis_client)
-    original_build_rate_limiter = factory_module.build_rate_limiter
+@dataclass(frozen=True)
+class LiveChargeResult:
+    challenge_response: httpx.Response
+    paid_response: httpx.Response
+    replay_response: httpx.Response
+    request: XRPLChargeRequest
+    tx_hash: str
 
-    def _build_in_memory_rate_limiter(_settings: Settings):
-        return SlowLimiter(key_func=factory_module.get_remote_address)
 
-    factory_module.build_rate_limiter = _build_in_memory_rate_limiter
+def _build_facilitator(settings: Settings) -> FastAPI:
+    service = XRPLService(settings, redis_client=FakeRedis())
+    original = factory_module.build_rate_limiter
+    factory_module.build_rate_limiter = lambda _settings: SlowLimiter(
+        key_func=factory_module.get_remote_address
+    )
     try:
-        return create_app(app_settings=app_settings, xrpl_service=xrpl_service)
+        return create_app(app_settings=settings, xrpl_service=service)
     finally:
-        factory_module.build_rate_limiter = original_build_rate_limiter
+        factory_module.build_rate_limiter = original
 
 
-def _attach_payment_middleware(
+def _build_merchant(
     *,
-    merchant_app: FastAPI,
     facilitator_app: FastAPI,
-    route_configs: dict[str, object],
-) -> httpx.AsyncClient:
-    facilitator_async_client = httpx.AsyncClient(
+    recipient: str,
+    amount: str,
+    currency: str,
+) -> tuple[FastAPI, httpx.AsyncClient]:
+    merchant = FastAPI()
+
+    @merchant.get("/paid")
+    async def paid(request: Request) -> dict[str, str]:
+        receipt = request.state.mpp_payment
+        return {
+            "reference": receipt.reference,
+            "tx_hash": receipt.tx_hash or "",
+            "payer": receipt.payer or "",
+        }
+
+    facilitator_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=facilitator_app),
         base_url=FACILITATOR_BASE_URL,
     )
-    merchant_app.add_middleware(
+    merchant.add_middleware(
         PaymentMiddlewareASGI,
-        route_configs=route_configs,
+        route_configs={
+            "GET /paid": RouteConfig(
+                facilitatorUrl=FACILITATOR_BASE_URL,
+                bearerToken=LIVE_TEST_BEARER_TOKEN,
+                chargeOptions=[
+                    ChargeRouteSpec(
+                        network="testnet",
+                        recipient=recipient,
+                        amount=amount,
+                        currency=currency,
+                        description="Live MPP 0.2 XRPL charge",
+                    )
+                ],
+            )
+        },
         challenge_secret=LIVE_TEST_CHALLENGE_SECRET,
-        client_factory=lambda facilitator_url, bearer_token: XRPLFacilitatorClient(
-            base_url=facilitator_url,
-            bearer_token=bearer_token,
-            async_client=facilitator_async_client,
+        client_factory=lambda _url, _token: XRPLFacilitatorClient(
+            base_url=FACILITATOR_BASE_URL,
+            bearer_token=LIVE_TEST_BEARER_TOKEN,
+            async_client=facilitator_client,
         ),
     )
-    return facilitator_async_client
+    return merchant, facilitator_client
 
 
-async def _perform_public_charge_flow(
-    *,
-    merchant_app: FastAPI,
-    signer: XRPLPaymentSigner,
-    path: str,
-) -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=merchant_app),
-        base_url=MERCHANT_BASE_URL,
-    ) as merchant_client:
-        challenge_response = await merchant_client.get(path)
-        challenges = decode_payment_challenges_response(challenge_response.headers)
-        if not challenges:
-            raise AssertionError("Expected at least one payment challenge")
-        credential = await signer.build_charge_credential_async(challenges[0])
-        authorization = build_payment_authorization(credential)
-        paid_response = await merchant_client.get(path, headers={"Authorization": authorization})
-        replay_response = await merchant_client.get(path, headers={"Authorization": authorization})
-    return challenge_response, paid_response, replay_response
-
-
-def _build_charge_merchant_app(
+def _build_paychannel_merchant(
     *,
     facilitator_app: FastAPI,
-    pay_to: str,
-    network: str,
-    xrp_drops: int | None = None,
-    amount: str | None = None,
-    asset_code: str = "XRP",
-    asset_issuer: str | None = None,
+    recipient: str,
 ) -> tuple[FastAPI, httpx.AsyncClient]:
-    merchant_app = FastAPI()
+    merchant = FastAPI()
 
-    @merchant_app.get("/paid")
-    async def paid(request: Request) -> dict[str, str]:
-        payment = request.state.mpp_payment
-        return {
-            "intent": payment.intent or "",
-            "reference": payment.reference,
-            "tx_hash": payment.tx_hash or "",
-            "payer": payment.payer or "",
-        }
+    def route(amount: int, description: str) -> RouteConfig:
+        return RouteConfig(
+            facilitatorUrl=FACILITATOR_BASE_URL,
+            bearerToken=LIVE_TEST_BEARER_TOKEN,
+            allowInsecureFacilitatorHttp=True,
+            sessionOptions=[
+                SessionRouteSpec(
+                    network="testnet",
+                    recipient=recipient,
+                    amount=str(amount),
+                    currency="XRP",
+                    description=description,
+                )
+            ],
+        )
 
-    facilitator_async_client = _attach_payment_middleware(
-        merchant_app=merchant_app,
-        facilitator_app=facilitator_app,
-        route_configs={
-            "GET /paid": require_payment(
-                facilitator_url=FACILITATOR_BASE_URL,
-                bearer_token=LIVE_TEST_BEARER_TOKEN,
-                pay_to=pay_to,
-                network=network,
-                xrp_drops=xrp_drops,
-                amount=amount,
-                asset_code=asset_code,
-                asset_issuer=asset_issuer,
-                description="Live public MPP charge route",
-            )
-        },
+    facilitator_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=facilitator_app),
+        base_url=FACILITATOR_BASE_URL,
     )
-    return merchant_app, facilitator_async_client
+    merchant.add_middleware(
+        PaymentMiddlewareASGI,
+        route_configs={
+            "GET /channel/open": route(0, "Open a live XRPL PayChannel"),
+            "GET /metered": route(
+                PAYCHANNEL_UNIT_DROPS,
+                "One live cumulative PayChannel unit",
+            ),
+            "GET /channel/close": route(0, "Finalize the live PayChannel voucher"),
+        },
+        challenge_secret=LIVE_TEST_CHALLENGE_SECRET,
+        client_factory=lambda _url, _token: XRPLFacilitatorClient(
+            base_url=FACILITATOR_BASE_URL,
+            bearer_token=LIVE_TEST_BEARER_TOKEN,
+            async_client=facilitator_client,
+        ),
+    )
 
+    @merchant.get("/channel/open")
+    async def opened(request: Request) -> dict[str, str]:
+        receipt = request.state.mpp_payment
+        return {"channel_id": receipt.channel_id or ""}
 
-def _build_session_merchant_app(
-    *,
-    facilitator_app: FastAPI,
-    pay_to: str,
-    network: str,
-) -> tuple[FastAPI, httpx.AsyncClient]:
-    merchant_app = FastAPI()
-
-    @merchant_app.get("/metered")
+    @merchant.get("/metered")
     async def metered(request: Request) -> dict[str, str]:
-        payment = request.state.mpp_payment
-        return {
-            "intent": payment.intent or "",
-            "reference": payment.reference,
-            "last_action": payment.last_action or "",
-            "prepaid_total": payment.prepaid_total or "",
-            "spent_total": payment.spent_total or "",
-            "available_balance": payment.available_balance or "",
-        }
+        receipt = request.state.mpp_payment
+        return {"cumulative": receipt.cumulative or "0"}
 
-    facilitator_async_client = _attach_payment_middleware(
-        merchant_app=merchant_app,
-        facilitator_app=facilitator_app,
-        route_configs={
-            "GET /metered": require_session(
-                facilitator_url=FACILITATOR_BASE_URL,
-                bearer_token=LIVE_TEST_BEARER_TOKEN,
-                pay_to=pay_to,
-                network=network,
-                xrp_drops=SESSION_UNIT_DROPS,
-                min_prepay_amount=str(SESSION_MIN_PREPAY_DROPS),
-                description="Live public MPP session route",
+    @merchant.get("/channel/close")
+    async def closed(request: Request) -> dict[str, str]:
+        receipt = request.state.mpp_payment
+        return {"tx_hash": receipt.tx_hash or ""}
+
+    return merchant, facilitator_client
+
+
+async def _perform_charge(
+    *,
+    merchant: FastAPI,
+    facilitator_client: httpx.AsyncClient,
+    signer: XRPLPaymentSigner,
+) -> LiveChargeResult:
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=merchant),
+            base_url=MERCHANT_BASE_URL,
+        ) as client:
+            challenge_response = await client.get("/paid")
+            challenges = decode_payment_challenges_response(challenge_response.headers)
+            assert len(challenges) == 1
+            decoded = decode_challenge_request(challenges[0])
+            assert isinstance(decoded, XRPLChargeRequest)
+            credential = await signer.build_charge_credential_async(challenges[0])
+            authorization = build_payment_authorization(credential)
+            paid_response = await client.get(
+                "/paid",
+                headers={"Authorization": authorization},
             )
-        },
-    )
-    return merchant_app, facilitator_async_client
-
-
-@pytest.mark.live
-@pytest.mark.skipif(
-    os.environ.get(LIVE_TEST_FLAG) != "1",
-    reason=f"Set {LIVE_TEST_FLAG}=1 to run the XRPL Testnet live integration test.",
-)
-def test_live_xrp_payment_round_trip() -> None:
-    rpc_url = resolve_live_testnet_rpc_url()
-    client = JsonRpcClient(rpc_url)
-    wallets = get_live_wallet_pair(client)
-    sender, receiver = _select_xrp_wallets(
-        client,
-        wallets,
-        amount_drops=XRP_PAYMENT_DROPS,
+            replay_response = await client.get(
+                "/paid",
+                headers={"Authorization": authorization},
+            )
+    finally:
+        await facilitator_client.aclose()
+    receipt = decode_payment_receipt_header(paid_response.headers)
+    assert receipt is not None and receipt.tx_hash
+    return LiveChargeResult(
+        challenge_response=challenge_response,
+        paid_response=paid_response,
+        replay_response=replay_response,
+        request=decoded,
+        tx_hash=receipt.tx_hash,
     )
 
-    app_settings = Settings(
+
+def _settings(
+    *,
+    rpc_url: str,
+    recipient: str,
+    allowed_issued_assets: str = "",
+    payer_public_key: str | None = None,
+    recipient_seed: str | None = None,
+    paychannel_min_settle_delay: int = 3_600,
+) -> Settings:
+    return Settings(
         _env_file=None,
         XRPL_RPC_URL=rpc_url,
-        MY_DESTINATION_ADDRESS=receiver.classic_address,
+        MY_DESTINATION_ADDRESS=recipient,
         REDIS_URL="redis://fake:6379/0",
-        NETWORK_ID="xrpl:1",
-        SETTLEMENT_MODE="validated",
-        VALIDATION_TIMEOUT=30,
-        MIN_XRP_DROPS=1000,
-        FACILITATOR_BEARER_TOKEN=LIVE_TEST_BEARER_TOKEN,
-        MPP_CHALLENGE_SECRET=LIVE_TEST_CHALLENGE_SECRET,
-    )
-    facilitator_app = _build_live_test_facilitator_app(app_settings)
-    merchant_app, facilitator_async_client = _build_charge_merchant_app(
-        facilitator_app=facilitator_app,
-        pay_to=receiver.classic_address,
-        network="xrpl:1",
-        xrp_drops=XRP_PAYMENT_DROPS,
-    )
-    signer = XRPLPaymentSigner(
-        sender,
-        rpc_url=rpc_url,
-        network="xrpl:1",
-    )
-
-    receiver_balance_before = get_validated_balance(client, receiver.classic_address)
-    async def _run_flow() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        try:
-            return await _perform_public_charge_flow(
-                merchant_app=merchant_app,
-                signer=signer,
-                path="/paid",
-            )
-        finally:
-            await facilitator_async_client.aclose()
-
-    challenge_response, charge_response, replay_response = asyncio.run(_run_flow())
-    challenges = decode_payment_challenges_response(challenge_response.headers)
-    assert len(challenges) == 1
-    challenge = challenges[0]
-    request = decode_challenge_request(challenge)
-    receipt = decode_payment_receipt_header(charge_response.headers)
-    assert receipt is not None
-
-    receiver_balance_after = get_validated_balance(client, receiver.classic_address)
-    tx_hash = receipt.tx_hash or ""
-    tx_response = client.request(Tx(transaction=tx_hash)).result
-    tx_payload = tx_response.get("tx_json") or tx_response.get("tx") or {}
-    ledger_tx_hash = tx_response.get("hash") or tx_payload.get("hash")
-    ledger_amount = tx_payload.get("Amount") or tx_payload.get("DeliverMax")
-
-    assert challenge_response.status_code == 402
-    assert challenge_response.headers["Cache-Control"] == "no-store"
-    assert challenge.intent == "charge"
-    assert request.recipient == receiver.classic_address
-    assert request.currency == "XRP:native"
-    assert request.amount == str(XRP_PAYMENT_DROPS)
-    assert charge_response.status_code == 200
-    assert charge_response.json()["intent"] == "charge"
-    assert charge_response.json()["reference"] == tx_hash
-    assert charge_response.json()["tx_hash"] == tx_hash
-    assert charge_response.json()["payer"] == sender.classic_address
-    assert receipt.intent == "charge"
-    assert receipt.invoice_id == request.method_details.invoice_id
-    assert receipt.tx_hash == tx_hash
-    assert receipt.settlement_status == "validated"
-    assert receipt.asset is not None and receipt.asset.code == "XRP"
-    assert receipt.asset.issuer is None
-    assert receipt.amount is not None and receipt.amount.value == str(XRP_PAYMENT_DROPS)
-    assert receipt.amount.unit == "drops"
-    assert receipt.amount.drops == XRP_PAYMENT_DROPS
-    assert replay_response.status_code == 402
-    assert "replay attack" in replay_response.json()["detail"].lower()
-    assert receiver_balance_after - receiver_balance_before == XRP_PAYMENT_DROPS
-    assert tx_response.get("validated") is True
-    assert ledger_tx_hash == tx_hash
-    assert tx_payload.get("Destination") == receiver.classic_address
-    assert ledger_amount == str(XRP_PAYMENT_DROPS)
-
-
-@pytest.mark.live
-@pytest.mark.skipif(
-    os.environ.get(LIVE_TEST_FLAG) != "1",
-    reason=f"Set {LIVE_TEST_FLAG}=1 to run the XRPL Testnet live integration test.",
-)
-def test_live_xrp_session_round_trip() -> None:
-    rpc_url = resolve_live_testnet_rpc_url()
-    client = JsonRpcClient(rpc_url)
-    wallets = get_live_wallet_pair(client)
-    sender, receiver = _select_xrp_wallets(
-        client,
-        wallets,
-        amount_drops=SESSION_MIN_PREPAY_DROPS * 2,
-    )
-
-    app_settings = Settings(
-        _env_file=None,
-        XRPL_RPC_URL=rpc_url,
-        MY_DESTINATION_ADDRESS=receiver.classic_address,
-        REDIS_URL="redis://fake:6379/0",
-        NETWORK_ID="xrpl:1",
-        SETTLEMENT_MODE="validated",
-        VALIDATION_TIMEOUT=30,
-        MIN_XRP_DROPS=1000,
-        FACILITATOR_BEARER_TOKEN=LIVE_TEST_BEARER_TOKEN,
-        MPP_CHALLENGE_SECRET=LIVE_TEST_CHALLENGE_SECRET,
-    )
-    facilitator_app = _build_live_test_facilitator_app(app_settings)
-    merchant_app, facilitator_async_client = _build_session_merchant_app(
-        facilitator_app=facilitator_app,
-        pay_to=receiver.classic_address,
-        network="xrpl:1",
-    )
-    signer = XRPLPaymentSigner(
-        sender,
-        rpc_url=rpc_url,
-        network="xrpl:1",
-    )
-
-    receiver_balance_before = get_validated_balance(client, receiver.classic_address)
-
-    async def _run_flow() -> tuple[httpx.Response, list[httpx.Response], httpx.Response]:
-        try:
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=merchant_app),
-                base_url=MERCHANT_BASE_URL,
-            ) as unpaid_client:
-                unpaid_response = await unpaid_client.get("/metered")
-
-            transport = XRPLPaymentTransport(
-                signer,
-                network="xrpl:1",
-                asset="XRP:native",
-                base_transport=httpx.ASGITransport(app=merchant_app),
-            )
-            async with httpx.AsyncClient(
-                transport=transport,
-                base_url=MERCHANT_BASE_URL,
-            ) as paid_client:
-                responses = [await paid_client.get("/metered") for _ in range(5)]
-                close_response = await transport.close_session(f"{MERCHANT_BASE_URL}/metered")
-            return unpaid_response, responses, close_response
-        finally:
-            await facilitator_async_client.aclose()
-
-    unpaid_response, responses, close_response = asyncio.run(_run_flow())
-    challenges = decode_payment_challenges_response(unpaid_response.headers)
-    assert len(challenges) == 1
-    challenge = challenges[0]
-    request = decode_challenge_request(challenge)
-
-    open_receipt = decode_payment_receipt_header(responses[0].headers)
-    assert open_receipt is not None
-    assert open_receipt.intent == "session"
-    assert open_receipt.last_action == "open"
-    assert open_receipt.session_id
-    assert open_receipt.session_token
-    assert open_receipt.prepaid_total == str(SESSION_MIN_PREPAY_DROPS)
-    assert open_receipt.spent_total == str(SESSION_UNIT_DROPS)
-    assert open_receipt.available_balance == str(SESSION_MIN_PREPAY_DROPS - SESSION_UNIT_DROPS)
-    assert responses[0].json() == {
-        "intent": "session",
-        "reference": open_receipt.session_id,
-        "last_action": "open",
-        "prepaid_total": str(SESSION_MIN_PREPAY_DROPS),
-        "spent_total": str(SESSION_UNIT_DROPS),
-        "available_balance": str(SESSION_MIN_PREPAY_DROPS - SESSION_UNIT_DROPS),
-    }
-
-    for index, response in enumerate(responses[1:4], start=2):
-        receipt = decode_payment_receipt_header(response.headers)
-        assert receipt is not None
-        assert response.status_code == 200
-        assert receipt.intent == "session"
-        assert receipt.last_action == "use"
-        assert receipt.prepaid_total == str(SESSION_MIN_PREPAY_DROPS)
-        assert receipt.spent_total == str(SESSION_UNIT_DROPS * index)
-        assert receipt.available_balance == str(SESSION_MIN_PREPAY_DROPS - (SESSION_UNIT_DROPS * index))
-
-    top_up_use_receipt = decode_payment_receipt_header(responses[4].headers)
-    assert top_up_use_receipt is not None
-    assert top_up_use_receipt.intent == "session"
-    assert top_up_use_receipt.last_action == "use"
-    assert top_up_use_receipt.session_id == open_receipt.session_id
-    assert top_up_use_receipt.prepaid_total == str(SESSION_MIN_PREPAY_DROPS * 2)
-    assert top_up_use_receipt.spent_total == str((SESSION_UNIT_DROPS * 4) + SESSION_UNIT_DROPS)
-    assert top_up_use_receipt.available_balance == str((SESSION_MIN_PREPAY_DROPS * 2) - (SESSION_UNIT_DROPS * 5))
-    assert responses[4].json() == {
-        "intent": "session",
-        "reference": open_receipt.session_id,
-        "last_action": "use",
-        "prepaid_total": str(SESSION_MIN_PREPAY_DROPS * 2),
-        "spent_total": str(SESSION_UNIT_DROPS * 5),
-        "available_balance": str((SESSION_MIN_PREPAY_DROPS * 2) - (SESSION_UNIT_DROPS * 5)),
-    }
-
-    close_receipt = decode_payment_receipt_header(close_response.headers)
-    assert close_receipt is not None
-    assert close_response.status_code == 200
-    assert close_response.json()["intent"] == "session"
-    assert close_response.json()["lastAction"] == "close"
-    assert close_response.json()["settlementStatus"] == "session_closed"
-    assert close_response.json()["sessionId"] == open_receipt.session_id
-    assert close_receipt.intent == "session"
-    assert close_receipt.last_action == "close"
-    assert close_receipt.session_id == open_receipt.session_id
-    assert close_receipt.prepaid_total == str(SESSION_MIN_PREPAY_DROPS * 2)
-    assert close_receipt.spent_total == str(SESSION_UNIT_DROPS * 5)
-    assert close_receipt.available_balance == str((SESSION_MIN_PREPAY_DROPS * 2) - (SESSION_UNIT_DROPS * 5))
-    assert close_receipt.settlement_status == "session_closed"
-
-    receiver_balance_after = get_validated_balance(client, receiver.classic_address)
-    assert unpaid_response.status_code == 402
-    assert unpaid_response.headers["Cache-Control"] == "no-store"
-    assert challenge.intent == "session"
-    assert request.recipient == receiver.classic_address
-    assert request.currency == "XRP:native"
-    assert request.amount == str(SESSION_UNIT_DROPS)
-    assert request.method_details.unit_amount == str(SESSION_UNIT_DROPS)
-    assert request.method_details.min_prepay_amount == str(SESSION_MIN_PREPAY_DROPS)
-    assert receiver_balance_after - receiver_balance_before == SESSION_MIN_PREPAY_DROPS * 2
-
-
-@pytest.mark.live
-@pytest.mark.skipif(
-    os.environ.get(LIVE_TEST_FLAG) != "1",
-    reason=f"Set {LIVE_TEST_FLAG}=1 to run the XRPL Testnet live integration test.",
-)
-def test_live_rlusd_payment_round_trip() -> None:
-    rpc_url = resolve_live_testnet_rpc_url()
-    client = JsonRpcClient(rpc_url)
-    issuer = os.environ.get(RLUSD_TESTNET_ISSUER_ENV, DEFAULT_RLUSD_TESTNET_ISSUER)
-    wallets = get_demo_wallet_set(client)
-    recover_tracked_claim_wallets(client, wallets.merchant_wallet, issuer)
-
-    for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("rlusd")):
-        ensure_rlusd_trustline(client, wallet, issuer)
-
-    sender, receiver = _select_rlusd_wallets(
-        client,
-        wallets,
-        issuer,
-    )
-
-    app_settings = Settings(
-        _env_file=None,
-        XRPL_RPC_URL=rpc_url,
-        MY_DESTINATION_ADDRESS=receiver.classic_address,
-        REDIS_URL="redis://fake:6379/0",
-        NETWORK_ID="xrpl:1",
-        SETTLEMENT_MODE="validated",
-        VALIDATION_TIMEOUT=30,
-        MIN_XRP_DROPS=1000,
-        ALLOWED_ISSUED_ASSETS=f"RLUSD:{issuer}",
-        FACILITATOR_BEARER_TOKEN=LIVE_TEST_BEARER_TOKEN,
-        MPP_CHALLENGE_SECRET=LIVE_TEST_CHALLENGE_SECRET,
-    )
-    facilitator_app = _build_live_test_facilitator_app(app_settings)
-    merchant_app, facilitator_async_client = _build_charge_merchant_app(
-        facilitator_app=facilitator_app,
-        pay_to=receiver.classic_address,
-        network="xrpl:1",
-        amount=str(RLUSD_PAYMENT_VALUE),
-        asset_code="RLUSD",
-        asset_issuer=issuer,
-    )
-    signer = XRPLPaymentSigner(
-        sender,
-        rpc_url=rpc_url,
-        network="xrpl:1",
-    )
-
-    receiver_balance_before = get_validated_trustline_balance(
-        client,
-        receiver.classic_address,
-        issuer,
-    )
-    async def _run_flow() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        try:
-            return await _perform_public_charge_flow(
-                merchant_app=merchant_app,
-                signer=signer,
-                path="/paid",
-            )
-        finally:
-            await facilitator_async_client.aclose()
-
-    challenge_response, charge_response, replay_response = asyncio.run(_run_flow())
-    challenges = decode_payment_challenges_response(challenge_response.headers)
-    assert len(challenges) == 1
-    challenge = challenges[0]
-    request = decode_challenge_request(challenge)
-    receipt = decode_payment_receipt_header(charge_response.headers)
-    assert receipt is not None
-
-    receiver_balance_after = get_validated_trustline_balance(
-        client,
-        receiver.classic_address,
-        issuer,
-    )
-    tx_hash = receipt.tx_hash or ""
-    tx_response = client.request(Tx(transaction=tx_hash)).result
-    tx_payload = tx_response.get("tx_json") or tx_response.get("tx") or {}
-    ledger_tx_hash = tx_response.get("hash") or tx_payload.get("hash")
-    ledger_amount = tx_payload.get("Amount") or tx_payload.get("DeliverMax")
-
-    assert challenge_response.status_code == 402
-    assert challenge.intent == "charge"
-    assert request.recipient == receiver.classic_address
-    assert request.currency == f"RLUSD:{issuer}"
-    assert request.amount == str(RLUSD_PAYMENT_VALUE)
-    assert charge_response.status_code == 200
-    assert charge_response.json()["intent"] == "charge"
-    assert charge_response.json()["reference"] == tx_hash
-    assert charge_response.json()["tx_hash"] == tx_hash
-    assert charge_response.json()["payer"] == sender.classic_address
-    assert receipt.intent == "charge"
-    assert receipt.invoice_id == request.method_details.invoice_id
-    assert receipt.tx_hash == tx_hash
-    assert receipt.settlement_status == "validated"
-    assert receipt.asset is not None
-    assert receipt.asset.code == "RLUSD"
-    assert receipt.asset.issuer == issuer
-    assert receipt.amount is not None and receipt.amount.value == str(RLUSD_PAYMENT_VALUE)
-    assert receipt.amount.unit == "issued"
-    assert receipt.amount.asset.code == "RLUSD"
-    assert receipt.amount.asset.issuer == issuer
-    assert replay_response.status_code == 402
-    assert "replay attack" in replay_response.json()["detail"].lower()
-    assert receiver_balance_after - receiver_balance_before == RLUSD_PAYMENT_VALUE
-    assert tx_response.get("validated") is True
-    assert ledger_tx_hash == tx_hash
-    assert tx_payload.get("Destination") == receiver.classic_address
-    assert isinstance(ledger_amount, dict)
-    assert normalize_currency_code(str(ledger_amount["currency"])) == "RLUSD"
-    assert ledger_amount["issuer"] == issuer
-    assert Decimal(str(ledger_amount["value"])) == RLUSD_PAYMENT_VALUE
-    settle_pair = LiveWalletPair(
-        wallet_a=wallets.merchant_wallet,
-        wallet_b=wallets.buyer_wallet("rlusd"),
-    )
-    consolidate_rlusd_to_wallet_a(client, settle_pair, issuer)
-    assert get_validated_trustline_balance(client, settle_pair.wallet_a.classic_address, issuer) >= (
-        receiver_balance_after - receiver_balance_before
-    )
-    assert get_validated_trustline_balance(client, settle_pair.wallet_b.classic_address, issuer) == Decimal(
-        "0"
-    )
-
-
-@pytest.mark.live
-@pytest.mark.skipif(
-    os.environ.get(LIVE_TEST_FLAG) != "1",
-    reason=f"Set {LIVE_TEST_FLAG}=1 to run the XRPL Testnet live integration test.",
-)
-def test_live_usdc_payment_round_trip() -> None:
-    rpc_url = resolve_live_testnet_rpc_url()
-    client = JsonRpcClient(rpc_url)
-    issuer = os.environ.get(USDC_TESTNET_ISSUER_ENV, DEFAULT_USDC_TESTNET_ISSUER)
-    wallets = get_demo_wallet_set(client)
-    recover_tracked_usdc_claim_wallets(client, wallets.merchant_wallet, issuer)
-
-    for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("usdc")):
-        ensure_usdc_trustline(client, wallet, issuer)
-
-    sender, receiver = _select_usdc_wallets(
-        client,
-        wallets,
-        issuer,
-    )
-
-    allowed_issued_assets = "" if issuer == USDC_TESTNET_ISSUER else f"USDC:{issuer}"
-    app_settings = Settings(
-        _env_file=None,
-        XRPL_RPC_URL=rpc_url,
-        MY_DESTINATION_ADDRESS=receiver.classic_address,
-        REDIS_URL="redis://fake:6379/0",
-        NETWORK_ID="xrpl:1",
+        NETWORK_ID="testnet",
         SETTLEMENT_MODE="validated",
         VALIDATION_TIMEOUT=30,
         MIN_XRP_DROPS=1000,
         ALLOWED_ISSUED_ASSETS=allowed_issued_assets,
         FACILITATOR_BEARER_TOKEN=LIVE_TEST_BEARER_TOKEN,
         MPP_CHALLENGE_SECRET=LIVE_TEST_CHALLENGE_SECRET,
-    )
-    facilitator_app = _build_live_test_facilitator_app(app_settings)
-    merchant_app, facilitator_async_client = _build_charge_merchant_app(
-        facilitator_app=facilitator_app,
-        pay_to=receiver.classic_address,
-        network="xrpl:1",
-        amount=str(USDC_PAYMENT_VALUE),
-        asset_code="USDC",
-        asset_issuer=issuer,
-    )
-    signer = XRPLPaymentSigner(
-        sender,
-        rpc_url=rpc_url,
-        network="xrpl:1",
+        PAYCHANNEL_PAYER_PUBLIC_KEY=payer_public_key,
+        PAYCHANNEL_RECIPIENT_SEED=recipient_seed,
+        PAYCHANNEL_MIN_SETTLE_DELAY=paychannel_min_settle_delay,
     )
 
-    receiver_balance_before = get_validated_usdc_trustline_balance(
-        client,
-        receiver.classic_address,
-        issuer,
+
+async def _perform_paychannel_round_trip(
+    *,
+    merchant: FastAPI,
+    facilitator_client: httpx.AsyncClient,
+    signer: XRPLPaymentSigner,
+    recipient: str,
+) -> list[PaymentReceipt]:
+    base_url = "https://merchant.local"
+    open_url = f"{base_url}/channel/open"
+    metered_url = f"{base_url}/metered"
+    close_url = f"{base_url}/channel/close"
+    ripple_now = int(datetime.now(UTC).timestamp()) - 946_684_800
+    open_blob = await signer.sign_channel_create_async(
+        destination=recipient,
+        funding_amount=PAYCHANNEL_FUNDING_DROPS,
+        settle_delay=PAYCHANNEL_SETTLE_DELAY,
+        cancel_after=ripple_now + 7_200,
     )
-    async def _run_flow() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        try:
-            return await _perform_public_charge_flow(
-                merchant_app=merchant_app,
-                signer=signer,
-                path="/paid",
+    transport = XRPLPaymentTransport(
+        signer,
+        network="testnet",
+        currency="XRP",
+        base_transport=httpx.ASGITransport(app=merchant),
+        payment_policy=XRPLPaymentPolicy(
+            expected_recipients=recipient,
+            max_amount=PAYCHANNEL_FUNDING_DROPS,
+            allowed_currencies={"XRP"},
+        ),
+        allow_insecure_localhost=True,
+    )
+    transport.register_open_transaction(open_url, transaction=open_blob)
+    receipts: list[PaymentReceipt] = []
+    try:
+        async with httpx.AsyncClient(transport=transport) as client:
+            open_response = await client.get(open_url)
+            assert open_response.status_code == 200
+            open_receipt = decode_payment_receipt_header(open_response.headers)
+            assert open_receipt is not None and open_receipt.channel_id
+            receipts.append(open_receipt)
+
+            transport.register_channel(
+                metered_url,
+                channel_id=open_receipt.channel_id,
+                cumulative_amount=open_receipt.cumulative or "0",
+                recipient=recipient,
+                network="testnet",
             )
-        finally:
-            await facilitator_async_client.aclose()
+            for _ in range(2):
+                response = await client.get(metered_url)
+                assert response.status_code == 200
+                receipt = decode_payment_receipt_header(response.headers)
+                assert receipt is not None
+                receipts.append(receipt)
 
-    challenge_response, charge_response, replay_response = asyncio.run(_run_flow())
-    challenges = decode_payment_challenges_response(challenge_response.headers)
-    assert len(challenges) == 1
-    challenge = challenges[0]
-    request = decode_challenge_request(challenge)
-    receipt = decode_payment_receipt_header(charge_response.headers)
+            latest = receipts[-1]
+            transport.register_channel(
+                close_url,
+                channel_id=latest.channel_id or "",
+                cumulative_amount=latest.cumulative or "0",
+                recipient=recipient,
+                network="testnet",
+            )
+            close_response = await transport.close_session(close_url)
+            assert close_response.status_code == 200
+            close_receipt = decode_payment_receipt_header(close_response.headers)
+            assert close_receipt is not None
+            receipts.append(close_receipt)
+    finally:
+        await facilitator_client.aclose()
+    return receipts
+
+
+def _assert_common(
+    result: LiveChargeResult,
+    *,
+    sender: Wallet,
+    receiver: Wallet,
+    currency: str,
+    amount: str,
+) -> dict:
+    receipt = decode_payment_receipt_header(result.paid_response.headers)
     assert receipt is not None
+    assert result.challenge_response.status_code == 402
+    assert result.challenge_response.headers["Cache-Control"] == "no-store"
+    assert result.request.recipient == receiver.classic_address
+    assert result.request.currency == currency
+    assert result.request.amount == amount
+    assert result.paid_response.status_code == 200
+    assert result.paid_response.json() == {
+        "reference": result.tx_hash,
+        "tx_hash": result.tx_hash,
+        "payer": sender.classic_address,
+    }
+    assert receipt.challenge_id is not None
+    explicit_invoice_id = (
+        result.request.method_details.invoice_id
+        if result.request.method_details is not None
+        else None
+    )
+    assert receipt.invoice_id == (
+        explicit_invoice_id or challenge_invoice_id(receipt.challenge_id)
+    )
+    assert receipt.network == "testnet"
+    assert receipt.payer == sender.classic_address
+    assert receipt.recipient == receiver.classic_address
+    assert receipt.settlement_status == "validated"
+    assert result.replay_response.status_code == 402
 
-    receiver_balance_after = get_validated_usdc_trustline_balance(
+    client = JsonRpcClient(resolve_live_testnet_rpc_url())
+    tx_response = client.request(Tx(transaction=result.tx_hash)).result
+    assert tx_response.get("validated") is True
+    tx_payload = tx_response.get("tx_json") or tx_response.get("tx") or {}
+    assert tx_payload.get("Destination") == receiver.classic_address
+    return tx_payload
+
+
+def _account_channel_ids(client: JsonRpcClient, account: str) -> set[str]:
+    response = client.request(
+        AccountChannels(
+            account=account,
+            ledger_index="validated",
+            limit=200,
+        )
+    ).result
+    channels = response.get("channels", [])
+    return {
+        str(channel["channel_id"]).upper()
+        for channel in channels
+        if isinstance(channel, dict) and channel.get("channel_id")
+    }
+
+
+def _close_and_refund_live_paychannel(
+    *,
+    client: JsonRpcClient,
+    funder: Wallet,
+    channel_id: str,
+) -> list[str]:
+    """Start funder close, then delete the channel after its short test delay."""
+
+    normalized_channel_id = channel_id.upper()
+    balance_while_locked = get_validated_balance(client, funder.classic_address)
+    transaction_hashes: list[str] = []
+    for _attempt in range(4):
+        if normalized_channel_id not in _account_channel_ids(
+            client,
+            funder.classic_address,
+        ):
+            break
+        response = submit_and_wait(
+            PaymentChannelClaim(
+                account=funder.classic_address,
+                channel=normalized_channel_id,
+                flags=TF_CLOSE,
+            ),
+            client,
+            funder,
+            fail_hard=True,
+        ).result
+        metadata = response.get("meta") or response.get("metaData")
+        result_code = (
+            metadata.get("TransactionResult")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if result_code == "tesSUCCESS":
+            tx_hash = response.get("hash")
+            assert isinstance(tx_hash, str) and len(tx_hash) == 64
+            transaction_hashes.append(tx_hash.upper())
+        else:
+            # A close submitted just before the one-second Expiration is
+            # validated can be refused until the next ledger. A missing entry
+            # means another validated close already completed cleanup.
+            assert result_code in {"tecNO_PERMISSION", "tecNO_ENTRY"}
+        if normalized_channel_id in _account_channel_ids(
+            client,
+            funder.classic_address,
+        ):
+            sleep(5)
+
+    assert normalized_channel_id not in _account_channel_ids(
         client,
+        funder.classic_address,
+    )
+    assert get_validated_balance(client, funder.classic_address) > balance_while_locked
+    return transaction_hashes
+
+
+@pytest.mark.live
+@LIVE_SKIP
+def test_live_xrp_charge_round_trip() -> None:
+    rpc_url = resolve_live_testnet_rpc_url()
+    rpc_client = JsonRpcClient(rpc_url)
+    sender, receiver = _select_xrp_wallets(
+        rpc_client,
+        get_live_wallet_pair(rpc_client),
+        amount_drops=XRP_PAYMENT_DROPS,
+    )
+    facilitator = _build_facilitator(
+        _settings(rpc_url=rpc_url, recipient=receiver.classic_address)
+    )
+    merchant, client = _build_merchant(
+        facilitator_app=facilitator,
+        recipient=receiver.classic_address,
+        amount=str(XRP_PAYMENT_DROPS),
+        currency="XRP",
+    )
+    before = get_validated_balance(rpc_client, receiver.classic_address)
+    result = asyncio.run(
+        _perform_charge(
+            merchant=merchant,
+            facilitator_client=client,
+            signer=XRPLPaymentSigner(sender, rpc_url=rpc_url, network="testnet"),
+        )
+    )
+    tx = _assert_common(
+        result,
+        sender=sender,
+        receiver=receiver,
+        currency="XRP",
+        amount=str(XRP_PAYMENT_DROPS),
+    )
+    assert (tx.get("Amount") or tx.get("DeliverMax")) == str(XRP_PAYMENT_DROPS)
+    assert get_validated_balance(rpc_client, receiver.classic_address) - before == XRP_PAYMENT_DROPS
+
+
+@pytest.mark.live
+@LIVE_SKIP
+def test_live_xrp_paychannel_open_voucher_close_and_recipient_redeem() -> None:
+    rpc_url = resolve_live_testnet_rpc_url()
+    rpc_client = JsonRpcClient(rpc_url)
+    payer, recipient = _select_xrp_wallets(
+        rpc_client,
+        get_live_wallet_pair(rpc_client),
+        amount_drops=int(PAYCHANNEL_FUNDING_DROPS),
+    )
+    preexisting_channels = _account_channel_ids(
+        rpc_client,
+        payer.classic_address,
+    )
+    facilitator = _build_facilitator(
+        _settings(
+            rpc_url=rpc_url,
+            recipient=recipient.classic_address,
+            payer_public_key=payer.public_key,
+            recipient_seed=recipient.seed,
+            paychannel_min_settle_delay=PAYCHANNEL_SETTLE_DELAY,
+        )
+    )
+    merchant, facilitator_client = _build_paychannel_merchant(
+        facilitator_app=facilitator,
+        recipient=recipient.classic_address,
+    )
+    cleanup_hashes: dict[str, list[str]] = {}
+    try:
+        receipts = asyncio.run(
+            _perform_paychannel_round_trip(
+                merchant=merchant,
+                facilitator_client=facilitator_client,
+                signer=XRPLPaymentSigner(
+                    payer,
+                    rpc_url=rpc_url,
+                    network="testnet",
+                    expected_recipient=recipient.classic_address,
+                    max_amount=PAYCHANNEL_FUNDING_DROPS,
+                    allowed_currencies={"XRP"},
+                ),
+                recipient=recipient.classic_address,
+            )
+        )
+
+        assert [receipt.action for receipt in receipts] == [
+            "open",
+            "voucher",
+            "voucher",
+            "close",
+        ]
+        close_receipt = receipts[-1]
+        assert close_receipt.cumulative == str(2 * PAYCHANNEL_UNIT_DROPS)
+        assert close_receipt.settlement_status == "validated"
+        assert close_receipt.tx_hash
+        tx_result = rpc_client.request(Tx(transaction=close_receipt.tx_hash)).result
+        assert tx_result.get("validated") is True
+        tx = tx_result.get("tx_json") or tx_result.get("tx") or tx_result
+        assert tx.get("TransactionType") == "PaymentChannelClaim"
+        assert tx.get("Account") == recipient.classic_address
+        assert tx.get("Channel") == close_receipt.channel_id
+        assert tx.get("Balance") == close_receipt.cumulative
+        assert int(tx.get("Flags", 0)) & TF_CLOSE == 0
+    finally:
+        new_channels = _account_channel_ids(
+            rpc_client,
+            payer.classic_address,
+        ) - preexisting_channels
+        for channel_id in new_channels:
+            cleanup_hashes[channel_id] = _close_and_refund_live_paychannel(
+                client=rpc_client,
+                funder=payer,
+                channel_id=channel_id,
+            )
+
+    assert close_receipt.channel_id in cleanup_hashes
+    assert cleanup_hashes[close_receipt.channel_id]
+
+
+@pytest.mark.live
+@LIVE_SKIP
+def test_live_rlusd_charge_round_trip() -> None:
+    rpc_url = resolve_live_testnet_rpc_url()
+    rpc_client = JsonRpcClient(rpc_url)
+    issuer = os.environ.get(RLUSD_TESTNET_ISSUER_ENV, DEFAULT_RLUSD_TESTNET_ISSUER)
+    wallets = get_demo_wallet_set(rpc_client)
+    recover_tracked_claim_wallets(rpc_client, wallets.merchant_wallet, issuer)
+    for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("rlusd")):
+        ensure_rlusd_trustline(rpc_client, wallet, issuer)
+    sender, receiver = _select_issued_wallets(
+        wallets,
+        balance=lambda wallet: get_validated_trustline_balance(
+            rpc_client,
+            wallet.classic_address,
+            issuer,
+            currency_code="RLUSD",
+        ),
+        symbol="rlusd",
+        required=RLUSD_PAYMENT_VALUE,
+    )
+    currency = serialize_currency(
+        IssuedCurrency(currency=xrpl_currency_code("RLUSD"), issuer=issuer)
+    )
+    facilitator = _build_facilitator(
+        _settings(
+            rpc_url=rpc_url,
+            recipient=receiver.classic_address,
+            allowed_issued_assets=f"RLUSD:{issuer}",
+        )
+    )
+    merchant, client = _build_merchant(
+        facilitator_app=facilitator,
+        recipient=receiver.classic_address,
+        amount=str(RLUSD_PAYMENT_VALUE),
+        currency=currency,
+    )
+    before = get_validated_trustline_balance(
+        rpc_client,
+        receiver.classic_address,
+        issuer,
+        currency_code="RLUSD",
+    )
+    result = asyncio.run(
+        _perform_charge(
+            merchant=merchant,
+            facilitator_client=client,
+            signer=XRPLPaymentSigner(sender, rpc_url=rpc_url, network="testnet"),
+        )
+    )
+    tx = _assert_common(
+        result,
+        sender=sender,
+        receiver=receiver,
+        currency=currency,
+        amount=str(RLUSD_PAYMENT_VALUE),
+    )
+    amount = tx.get("Amount") or tx.get("DeliverMax")
+    assert normalize_currency_code(str(amount["currency"])) == "RLUSD"
+    assert Decimal(str(amount["value"])) == RLUSD_PAYMENT_VALUE
+    after = get_validated_trustline_balance(
+        rpc_client,
+        receiver.classic_address,
+        issuer,
+        currency_code="RLUSD",
+    )
+    assert after - before == RLUSD_PAYMENT_VALUE
+
+
+@pytest.mark.live
+@LIVE_SKIP
+def test_live_usdc_charge_round_trip() -> None:
+    rpc_url = resolve_live_testnet_rpc_url()
+    rpc_client = JsonRpcClient(rpc_url)
+    issuer = os.environ.get(USDC_TESTNET_ISSUER_ENV, DEFAULT_USDC_TESTNET_ISSUER)
+    wallets = get_demo_wallet_set(rpc_client)
+    recover_tracked_usdc_claim_wallets(rpc_client, wallets.merchant_wallet, issuer)
+    for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("usdc")):
+        ensure_usdc_trustline(rpc_client, wallet, issuer)
+    sender, receiver = _select_issued_wallets(
+        wallets,
+        balance=lambda wallet: get_validated_usdc_trustline_balance(
+            rpc_client,
+            wallet.classic_address,
+            issuer,
+        ),
+        symbol="usdc",
+        required=USDC_PAYMENT_VALUE,
+    )
+    currency = serialize_currency(
+        IssuedCurrency(currency=xrpl_currency_code("USDC"), issuer=issuer)
+    )
+    facilitator = _build_facilitator(
+        _settings(
+            rpc_url=rpc_url,
+            recipient=receiver.classic_address,
+            allowed_issued_assets=f"USDC:{issuer}",
+        )
+    )
+    merchant, client = _build_merchant(
+        facilitator_app=facilitator,
+        recipient=receiver.classic_address,
+        amount=str(USDC_PAYMENT_VALUE),
+        currency=currency,
+    )
+    before = get_validated_usdc_trustline_balance(
+        rpc_client,
         receiver.classic_address,
         issuer,
     )
-    tx_hash = receipt.tx_hash or ""
-    tx_response = client.request(Tx(transaction=tx_hash)).result
-    tx_payload = tx_response.get("tx_json") or tx_response.get("tx") or {}
-    ledger_tx_hash = tx_response.get("hash") or tx_payload.get("hash")
-    ledger_amount = tx_payload.get("Amount") or tx_payload.get("DeliverMax")
-
-    assert challenge_response.status_code == 402
-    assert challenge.intent == "charge"
-    assert request.recipient == receiver.classic_address
-    assert request.currency == f"USDC:{issuer}"
-    assert request.amount == str(USDC_PAYMENT_VALUE)
-    assert charge_response.status_code == 200
-    assert charge_response.json()["intent"] == "charge"
-    assert charge_response.json()["reference"] == tx_hash
-    assert charge_response.json()["tx_hash"] == tx_hash
-    assert charge_response.json()["payer"] == sender.classic_address
-    assert receipt.intent == "charge"
-    assert receipt.invoice_id == request.method_details.invoice_id
-    assert receipt.tx_hash == tx_hash
-    assert receipt.settlement_status == "validated"
-    assert receipt.asset is not None
-    assert receipt.asset.code == "USDC"
-    assert receipt.asset.issuer == issuer
-    assert receipt.amount is not None and receipt.amount.value == str(USDC_PAYMENT_VALUE)
-    assert receipt.amount.unit == "issued"
-    assert receipt.amount.asset.code == "USDC"
-    assert receipt.amount.asset.issuer == issuer
-    assert replay_response.status_code == 402
-    assert "replay attack" in replay_response.json()["detail"].lower()
-    assert receiver_balance_after - receiver_balance_before == USDC_PAYMENT_VALUE
-    assert tx_response.get("validated") is True
-    assert ledger_tx_hash == tx_hash
-    assert tx_payload.get("Destination") == receiver.classic_address
-    assert isinstance(ledger_amount, dict)
-    assert normalize_currency_code(str(ledger_amount["currency"])) == "USDC"
-    assert ledger_amount["issuer"] == issuer
-    assert Decimal(str(ledger_amount["value"])) == USDC_PAYMENT_VALUE
-    settle_pair = LiveWalletPair(
-        wallet_a=wallets.merchant_wallet,
-        wallet_b=wallets.buyer_wallet("usdc"),
+    result = asyncio.run(
+        _perform_charge(
+            merchant=merchant,
+            facilitator_client=client,
+            signer=XRPLPaymentSigner(sender, rpc_url=rpc_url, network="testnet"),
+        )
     )
-    consolidate_usdc_to_wallet_a(client, settle_pair, issuer)
-    assert get_validated_usdc_trustline_balance(client, settle_pair.wallet_a.classic_address, issuer) >= (
-        receiver_balance_after - receiver_balance_before
+    tx = _assert_common(
+        result,
+        sender=sender,
+        receiver=receiver,
+        currency=currency,
+        amount=str(USDC_PAYMENT_VALUE),
     )
-    assert get_validated_usdc_trustline_balance(client, settle_pair.wallet_b.classic_address, issuer) == Decimal(
-        "0"
+    amount = tx.get("Amount") or tx.get("DeliverMax")
+    assert normalize_currency_code(str(amount["currency"])) == "USDC"
+    assert Decimal(str(amount["value"])) == USDC_PAYMENT_VALUE
+    after = get_validated_usdc_trustline_balance(
+        rpc_client,
+        receiver.classic_address,
+        issuer,
     )
+    assert after - before == USDC_PAYMENT_VALUE
 
 
 def _select_xrp_wallets(
@@ -696,80 +740,41 @@ def _select_xrp_wallets(
     *,
     amount_drops: int,
 ) -> tuple[Wallet, Wallet]:
-    wallet_balances = [
-        (wallet, get_validated_balance(client, wallet.classic_address))
-        for wallet in wallets.as_list()
-    ]
-    wallet_balances.sort(key=lambda entry: entry[1], reverse=True)
-    sender, sender_balance = wallet_balances[0]
-    receiver, _receiver_balance = wallet_balances[1]
-    if sender_balance <= amount_drops:
+    ranked = sorted(
+        (
+            (wallet, get_validated_balance(client, wallet.classic_address))
+            for wallet in wallets.as_list()
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    sender, balance = ranked[0]
+    if balance <= amount_drops:
         pytest.skip(
-            "Cached XRPL Testnet wallets do not have enough XRP left. "
-            f"Delete {wallet_cache_path()} to mint a fresh wallet pair."
+            "Cached Testnet wallets need more XRP; delete "
+            f"{wallet_cache_path()} to mint fresh wallets."
         )
-    return sender, receiver
+    return sender, ranked[1][0]
 
 
-def _select_rlusd_wallets(
-    client: JsonRpcClient,
+def _select_issued_wallets(
     wallets: DemoWalletSet,
-    issuer: str,
+    *,
+    balance: Callable[[Wallet], Decimal],
+    symbol: str,
+    required: Decimal,
 ) -> tuple[Wallet, Wallet]:
-    sender, receiver = _wallet_with_rlusd_liquidity(client, wallets, issuer)
-    if sender is not None and receiver is not None:
-        return sender, receiver
-
-    pytest.skip(
-        "Cached RLUSD test wallets do not have enough balance after tracked-wallet recovery. "
-        "Run `python -m devtools.rlusd_topup` to replenish the accumulator and retry."
+    ranked = sorted(
+        (
+            (wallet, balance(wallet))
+            for wallet in (wallets.merchant_wallet, wallets.buyer_wallet(symbol))
+        ),
+        key=lambda item: item[1],
+        reverse=True,
     )
-
-
-def _wallet_with_rlusd_liquidity(
-    client: JsonRpcClient,
-    wallets: DemoWalletSet,
-    issuer: str,
-) -> tuple[Wallet | None, Wallet | None]:
-    wallet_balances = [
-        (wallet, get_validated_trustline_balance(client, wallet.classic_address, issuer))
-        for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("rlusd"))
-    ]
-    wallet_balances.sort(key=lambda entry: entry[1], reverse=True)
-    sender, sender_balance = wallet_balances[0]
-    receiver, _receiver_balance = wallet_balances[1]
-    if sender_balance >= RLUSD_PAYMENT_VALUE:
-        return sender, receiver
-    return None, None
-
-
-def _select_usdc_wallets(
-    client: JsonRpcClient,
-    wallets: DemoWalletSet,
-    issuer: str,
-) -> tuple[Wallet, Wallet]:
-    sender, receiver = _wallet_with_usdc_liquidity(client, wallets, issuer)
-    if sender is not None and receiver is not None:
-        return sender, receiver
-
-    pytest.skip(
-        "Cached USDC test wallets do not have enough balance after tracked-wallet recovery. "
-        "Run `python -m devtools.usdc_topup` to prepare a manual Circle faucet claim and retry."
-    )
-
-
-def _wallet_with_usdc_liquidity(
-    client: JsonRpcClient,
-    wallets: DemoWalletSet,
-    issuer: str,
-) -> tuple[Wallet | None, Wallet | None]:
-    wallet_balances = [
-        (wallet, get_validated_usdc_trustline_balance(client, wallet.classic_address, issuer))
-        for wallet in (wallets.merchant_wallet, wallets.buyer_wallet("usdc"))
-    ]
-    wallet_balances.sort(key=lambda entry: entry[1], reverse=True)
-    sender, sender_balance = wallet_balances[0]
-    receiver, _receiver_balance = wallet_balances[1]
-    if sender_balance >= USDC_PAYMENT_VALUE:
-        return sender, receiver
-    return None, None
+    if ranked[0][1] < required:
+        pytest.skip(
+            f"Cached {symbol.upper()} wallets need funding; run "
+            f"`python -m devtools.{symbol}_topup`."
+        )
+    return ranked[0][0], ranked[1][0]

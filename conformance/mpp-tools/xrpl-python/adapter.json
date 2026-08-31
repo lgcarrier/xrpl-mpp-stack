@@ -1,0 +1,22 @@
+{
+  "$schema": "../../schemas/adapter-manifest.schema.json",
+  "schema": 1,
+  "name": "xrpl-python",
+  "language": "python",
+  "command": [
+    "../../../.venv/bin/python",
+    "adapter.py"
+  ],
+  "cwd": ".",
+  "capabilities": [
+    "challenge.parse",
+    "challenge.format",
+    "credential.parse",
+    "credential.format",
+    "receipt.parse",
+    "receipt.format",
+    "base64url.encode",
+    "base64url.decode",
+    "challenge.id"
+  ]
+}

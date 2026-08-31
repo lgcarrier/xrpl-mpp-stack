@@ -24,6 +24,7 @@ from xrpl_mpp_core import (
 )
 
 SECRET = "mpp-http-test-secret"
+RECIPIENT = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
 
 
 def test_jcs_dumps_sorts_object_keys() -> None:
@@ -42,9 +43,9 @@ def test_extract_payment_challenges_reads_repeated_www_authenticate_headers() ->
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 32),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
     )
@@ -55,14 +56,12 @@ def test_extract_payment_challenges_reads_repeated_www_authenticate_headers() ->
         intent="session",
         request_model=XRPLSessionRequest(
             amount="250",
-            currency="XRP:native",
-            recipient="rDESTINATION",
+            currency="XRP",
+            channelId="C" * 64,
+            recipient=RECIPIENT,
             methodDetails=XRPLSessionMethodDetails(
-                network="xrpl:1",
-                sessionId="session-123",
-                asset="XRP:native",
-                unitAmount="250",
-                minPrepayAmount="1000",
+                network="testnet",
+                cumulativeAmount="1000",
             ),
         ),
         expires_in_seconds=300,
@@ -77,7 +76,7 @@ def test_extract_payment_challenges_reads_repeated_www_authenticate_headers() ->
     decoded = extract_payment_challenges(headers)
 
     assert [item.intent for item in decoded] == ["charge", "session"]
-    assert decode_challenge_request(decoded[1]).method_details.session_id == "session-123"
+    assert decode_challenge_request(decoded[1]).channel_id == "C" * 64
 
 
 def test_extract_payment_challenges_reads_coalesced_www_authenticate_headers() -> None:
@@ -88,9 +87,9 @@ def test_extract_payment_challenges_reads_coalesced_www_authenticate_headers() -
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
     )
@@ -101,9 +100,9 @@ def test_extract_payment_challenges_reads_coalesced_www_authenticate_headers() -
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="2000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="B" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="B" * 64),
         ),
         expires_in_seconds=300,
     )
@@ -129,9 +128,9 @@ def test_extract_payment_challenges_accepts_mixed_case_payment_scheme() -> None:
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
     )
@@ -160,9 +159,9 @@ def test_payment_challenge_parser_round_trips_escaped_description() -> None:
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
         description='premium "gold" access',
@@ -182,13 +181,16 @@ def test_parse_payment_authorization_header_accepts_mixed_case_payment_scheme() 
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
     )
-    credential = PaymentCredential(challenge=challenge, payload={"signedTxBlob": "DEADBEEF"})
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "transaction", "blob": "DEADBEEF"},
+    )
 
     parsed = parse_payment_authorization_header(
         f"pAyMeNt {encode_payment_credential(credential)}"
@@ -205,9 +207,9 @@ def test_render_payment_challenge_keeps_canonical_scheme_casing() -> None:
         intent="charge",
         request_model=XRPLChargeRequest(
             amount="1000",
-            currency="XRP:native",
-            recipient="rDESTINATION",
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            currency="XRP",
+            recipient=RECIPIENT,
+            methodDetails=XRPLChargeMethodDetails(network="testnet", invoiceId="A" * 64),
         ),
         expires_in_seconds=300,
     )
@@ -217,19 +219,17 @@ def test_render_payment_challenge_keeps_canonical_scheme_casing() -> None:
 
 def test_payment_receipt_round_trips_via_base64url_header() -> None:
     receipt = PaymentReceipt(
+        status="success",
         method="xrpl",
         timestamp="2026-03-21T12:00:00Z",
         reference="ABC123",
         challengeId="challenge-id",
-        intent="charge",
-        network="xrpl:1",
+        network="testnet",
         payer="rBuyer",
         recipient="rMerchant",
-        invoiceId="A" * 32,
+        invoiceId="A" * 64,
         txHash="ABC123",
         settlementStatus="validated",
-        asset={"code": "XRP"},
-        amount={"value": "1000", "unit": "drops", "asset": {"code": "XRP"}, "drops": 1000},
     )
 
     encoded = encode_payment_receipt(receipt)
@@ -238,17 +238,15 @@ def test_payment_receipt_round_trips_via_base64url_header() -> None:
     assert decoded == receipt
 
 
-def test_session_request_rejects_divergent_unit_amount() -> None:
-    with pytest.raises(ValueError, match="unitAmount must match amount"):
+def test_session_request_rejects_legacy_prepaid_fields() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         XRPLSessionRequest(
             amount="250",
-            currency="XRP:native",
-            recipient="rDESTINATION",
+            currency="XRP",
+            channelId="C" * 64,
+            recipient=RECIPIENT,
             methodDetails=XRPLSessionMethodDetails(
-                network="xrpl:1",
+                network="testnet",
                 sessionId="session-123",
-                asset="XRP:native",
-                unitAmount="500",
-                minPrepayAmount="1000",
             ),
         )

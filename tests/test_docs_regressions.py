@@ -25,5 +25,7 @@ def test_replay_and_freshness_doc_matches_current_mpp_flow() -> None:
     assert "/settle" not in doc
     assert "falls back to the first 32 hex characters" not in doc
     assert "invoiceId" in doc
-    assert "sessionId" in doc
+    assert "sessionId" not in doc
+    assert "channelId" in doc
+    assert "cumulativeAmount" in doc
     assert "InvoiceID" in doc

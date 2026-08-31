@@ -1,3 +1,6 @@
+from xrpl_mpp_core import MPPProblemDetails
+
+
 class XRPLMPPMiddlewareError(Exception):
     """Base exception for xrpl_mpp_middleware errors."""
 
@@ -16,6 +19,28 @@ class FacilitatorError(XRPLMPPMiddlewareError):
 
 class FacilitatorTransportError(FacilitatorError):
     """Raised when the facilitator cannot be reached or returns 5xx."""
+
+    def __init__(self, detail: str, *, payment_reference: str | None = None) -> None:
+        self.detail = detail
+        self.payment_reference = payment_reference
+        super().__init__(detail)
+
+
+class FacilitatorSettlementPendingError(FacilitatorTransportError):
+    """A sanitized facilitator response for an ambiguously settled payment."""
+
+    def __init__(
+        self,
+        problem: MPPProblemDetails,
+        *,
+        retry_after: str | None = None,
+    ) -> None:
+        self.problem = problem
+        self.retry_after = retry_after
+        super().__init__(
+            problem.detail,
+            payment_reference=problem.payment_reference,
+        )
 
 
 class FacilitatorProtocolError(FacilitatorError):

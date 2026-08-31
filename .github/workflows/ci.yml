@@ -54,7 +54,7 @@ jobs:
 
       - name: Build package artifacts
         run: |
-          for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do
+          for package in packages/core packages/facilitator packages/middleware packages/client packages/payer packages/mcp; do
             (
               cd "$package"
               python -m build --sdist
@@ -66,7 +66,7 @@ jobs:
         run: twine check packages/*/dist/*
 
       - name: Smoke import stack packages
-        run: python -c "import xrpl_mpp_core, xrpl_mpp_facilitator, xrpl_mpp_middleware, xrpl_mpp_client, xrpl_mpp_payer"
+        run: python -c "import xrpl_mpp_core, xrpl_mpp_facilitator, xrpl_mpp_middleware, xrpl_mpp_client, xrpl_mpp_payer, xrpl_mpp_mcp"
 
       - name: Compile source files
         run: PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools
@@ -82,6 +82,11 @@ jobs:
           docker run --rm xrpl-mpp-facilitator:ci \
             python -c "import os, pathlib; assert os.getuid() != 0, 'container runs as root'; forbidden = [path for path in ('/app/.git', '/app/.env', '/app/.live-test-wallets') if pathlib.Path(path).exists()]; assert not forbidden, f'unexpected files in image: {forbidden}'"
 
+      - name: Verify Docker buyer-agent MCP dependencies
+        run: |
+          docker run --rm xrpl-mpp-facilitator:ci \
+            python -c "import fastmcp, xrpl_mpp_payer.mcp as module; assert module.mcp is not None"
+
   publish-readiness:
     runs-on: ubuntu-latest
     strategy:
@@ -93,6 +98,7 @@ jobs:
           - middleware
           - client
           - payer
+          - mcp
 
     steps:
       - name: Check out repository
@@ -126,6 +132,10 @@ jobs:
             payer)
               echo "PACKAGE_DIR=packages/payer" >> "$GITHUB_ENV"
               echo "PACKAGE_NAME=xrpl-mpp-payer" >> "$GITHUB_ENV"
+              ;;
+            mcp)
+              echo "PACKAGE_DIR=packages/mcp" >> "$GITHUB_ENV"
+              echo "PACKAGE_NAME=xrpl-mpp-mcp" >> "$GITHUB_ENV"
               ;;
             *)
               echo "Unsupported package target: ${{ matrix.target }}" >&2
@@ -210,6 +220,9 @@ jobs:
               python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
               xrpl-mpp --help >/dev/null
               ;;
+            mcp)
+              python -c "from xrpl_mpp_mcp import CallbackPaymentProcessor; assert CallbackPaymentProcessor"
+              ;;
           esac
 
       - name: Smoke install sdist
@@ -239,6 +252,9 @@ jobs:
             payer)
               python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
               xrpl-mpp --help >/dev/null
+              ;;
+            mcp)
+              python -c "from xrpl_mpp_mcp import CallbackPaymentProcessor; assert CallbackPaymentProcessor"
               ;;
           esac
 

@@ -1,92 +1,100 @@
 # Troubleshooting
 
-## `XRPL_WALLET_SEED is required`
+## No Payment challenge on `402`
 
-Run `python -m devtools.quickstart` first, or make sure `.env.quickstart` includes `XRPL_WALLET_SEED`.
+An MPP payment response must include at least one
+`WWW-Authenticate: Payment ...` challenge. Check route matching, reverse-proxy
+header forwarding, and middleware order. Do not synthesize terms from the
+problem body.
 
-## Quickstart cannot find a healthy public XRPL Testnet RPC endpoint
+## Credential replaced application bearer auth
 
-The quickstart and top-up helpers probe a small list of public Testnet JSON-RPC servers by default.
-If all of them are unavailable from your machine, pin one explicitly:
+Configure the route to issue `header="Payment-Authorization"`. The buyer should
+preserve `Authorization: Bearer ...` and put the Payment credential in
+`Payment-Authorization`. The credential's echoed challenge must contain the
+same header selection.
 
-```bash
-export XRPL_TESTNET_RPC_URL=https://your-testnet-rpc.example/
-python -m devtools.quickstart
-```
+## Network or currency rejected
 
-You can also pass `--xrpl-rpc-url ...` to `devtools.quickstart`, `devtools.rlusd_topup`, or
-`devtools.usdc_topup`.
+0.2 accepts named networks: `mainnet`, `testnet`, and `devnet`. It accepts `XRP`
+or canonical XRPL JSON currency descriptors. Legacy CAIP-like network strings,
+`XRP:native`, and colon-delimited issued assets are intentionally rejected.
 
-For the generated runtime stack, keep using `XRPL_RPC_URL` in `.env.quickstart` or your shell if
-you want to pin the buyer, payer, or facilitator to a specific RPC provider.
+## Invoice mismatch
 
-## Docker Compose starts, but the buyer still gets `402`
+Copy the challenge-provided `invoiceId`, or use the shared deterministic
+InvoiceID derivation from the challenge ID. A visually similar external ID or
+session identifier is not interchangeable with the 64-hex XRPL InvoiceID.
 
-- confirm the facilitator and merchant are using the same `FACILITATOR_BEARER_TOKEN`
-- make sure the buyer is using the same `XRPL_NETWORK` as the merchant route
-- for issued assets, confirm `PAYMENT_ASSET` matches the merchant `PRICE_ASSET_CODE` and `PRICE_ASSET_ISSUER`
-- inspect the decoded `WWW-Authenticate: Payment` challenge and the retry shape described in [Header Contract](how-it-works/header-contract.md)
-- confirm the facilitator reports the expected asset and settlement mode from `GET /supported`
+## Transaction rejected after submission
 
-## `Provided invoice_id does not match transaction InvoiceID`
+Inspect safe decoded fields and the XRPL result:
 
-The buyer sent an MPP credential whose challenge invoice/session reference does not match the XRPL transaction `InvoiceID`.
+- account/source DID;
+- destination and destination tag;
+- currency, issuer/MPT ID, and exact amount;
+- InvoiceID, source tag, and requested memos;
+- partial-payment flags;
+- validated ledger result and ledger freshness;
+- replay reservation state.
 
-Fix one of these:
+Do not print the wallet seed or full signed blob while debugging.
 
-- use `XRPLPaymentSigner` or another code path that copies the challenge `invoiceId` or `sessionId` into the XRPL `InvoiceID`
-- if you sign manually, copy the challenge reference into the transaction `InvoiceID` before signing
-- inspect the signed transaction you are generating and confirm it actually contains the expected `InvoiceID`
+## Settlement status unknown
 
-If you are working outside the built-in MPP challenge flow, make sure the credential and the signed transaction are both derived from the same challenge data.
+A `503` `settlement-pending` or `settlement-unknown` problem is not a payment
+rejection. The transaction may already have validated even if the submit or
+polling response was lost. Preserve its `paymentReference`, check that exact
+transaction hash against a validated ledger, and retry the same credential only
+when needed. Do not answer this state with a fresh charge or a newly signed
+`PaymentChannelCreate`; that can pay or lock funds twice. These responses are
+`private, no-store` and never carry a fresh challenge or `Payment-Receipt`.
 
-## The facilitator cannot start
+## PaymentChannel voucher rejected
 
-- confirm Redis is reachable at `redis://redis:6379/0` inside Docker Compose
-- confirm `MY_DESTINATION_ADDRESS` and `FACILITATOR_BEARER_TOKEN` are set
-- if you are using `redis_gateways`, confirm your bearer token exists in Redis with `status=active` and a non-empty `gateway_id`
+Confirm that the channel ID, named network, payer, recipient, and signing key
+match the stored channel. The voucher amount must be the new cumulative total
+and must be strictly greater than the accepted high-water value. All replicas
+must share the same Redis channel state.
 
-## `Transaction already processed (replay attack)`
+If the channel was opened or funded out of band, confirm its validated ledger
+entry matches `PAYCHANNEL_PAYER_PUBLIC_KEY`, `MY_DESTINATION_ADDRESS`, minimum
+settle delay, and closing margin. A `PaymentChannelFund` is visible only after
+validation. New claims are intentionally refused within
+`PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS` of `Expiration` or `CancelAfter`.
 
-The facilitator saw the same `invoice_id` or signed transaction blob more than once.
+## PaymentChannel close did not close or refund the channel
 
-Check [Replay And Freshness](how-it-works/replay-and-freshness.md) if you need the exact Redis behavior. In practice:
+MPP `close` is a final voucher. Without `PAYCHANNEL_RECIPIENT_SEED`, no
+recipient-side ledger transaction is submitted. With it, the facilitator
+submits and validates a claim for the final cumulative amount, but that claim
+does not use `tfClose`, delete the channel, or refund unused XRP. The channel
+funder must initiate XRPL closure, or the configured `CancelAfter` must elapse.
 
-- do not reuse the same signed transaction blob for multiple paid requests
-- generate a fresh `invoice_id` per request when you want explicit correlation
-- if a prior settlement failed before returning to the buyer, inspect facilitator logs before retrying blindly
+If background redemption is enabled, inspect the structured
+`paychannel_redemption_*` events, confirm every replica shares Redis, and verify
+the configured fee cap and signer availability. An ambiguous submit holds the
+per-channel lease until it expires; do not manually issue a fresh, higher claim
+while reconciling the existing cumulative amount.
 
-## `Transaction LastLedgerSequence required in redis_gateways mode`
+## No receipt
 
-Public-gateway mode requires every payment to carry a bounded `LastLedgerSequence`.
+`Payment-Receipt` belongs only on successful paid responses. If verification
+failed or the protected application returned an error, its absence is correct.
+Also check whether a reverse proxy strips the header.
 
-Fix one of these:
+## MCP error
 
-- enable XRPL autofill on the buyer signer so the transaction gets a ledger bound automatically
-- set `LastLedgerSequence` yourself before signing
-- switch back to `single_token` mode for local-only demos
+- `-32042`: payment required; select a challenge.
+- `-32043`: verification failed; use the fresh returned challenge.
+- `-32602`: malformed credential metadata or conflicting `_meta` placement.
+- `-32603`: internal payment processor failure.
 
-The full rule set is documented in [Replay And Freshness](how-it-works/replay-and-freshness.md).
+Bind retries to the same paid operation request. A credential from an HTTP
+exchange or another tool call is not transferable.
 
-## RLUSD claims are rate limited
+## Public Testnet instability
 
-Rerun `python -m devtools.rlusd_topup` later. The helper records local cooldown state under `.live-test-wallets/rlusd-claim-state.json`.
-
-## Issued-asset demo fails with `tecPATH_DRY` or the buyer wallet is unfunded
-
-If the demo trace shows the shared merchant wallet holding RLUSD or USDC while
-the buyer wallet has `0`, the derived env file is using the dedicated issued-asset
-buyer seed but that wallet has not been funded yet.
-
-Recover and bridge funds, then rerun the demo:
-
-- RLUSD: `python -m devtools.rlusd_topup`
-- USDC: `python -m devtools.usdc_topup`
-
-The helpers recover tracked claim wallets, sweep funds back into the shared
-merchant wallet, and then fund the dedicated buyer wallet that
-`.env.quickstart.rlusd` or `.env.quickstart.usdc` points at.
-
-## USDC does not appear after the Circle faucet claim
-
-Rerun `python -m devtools.usdc_topup` after the faucet transfer is visible on XRPL Testnet. The helper is designed to recover and sweep later claims.
+Faucets and public RPC endpoints can be unavailable or lagging. Confirm endpoint
+health and the current ledger independently. Keep the live Testnet test opt-in;
+the deterministic suite should still pass without network access.

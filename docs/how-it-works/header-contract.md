@@ -1,76 +1,82 @@
-# Header Contract
+# MPP HTTP header contract
 
-The stack speaks MPP HTTP over three standard headers:
+The HTTP layer follows the MPP Payment authentication scheme. Header names are
+case-insensitive; examples use canonical spelling.
 
-- `WWW-Authenticate: Payment ...`
-- `Authorization: Payment <token>`
-- `Payment-Receipt: <token>`
+## Client preference
+
+```http
+Accept-Payment: xrpl/charge, xrpl/session;q=0.8
+```
+
+Each range is `method/intent` with an optional quality value. Wildcards are
+allowed. A quality of `0` rejects that range. Preferences help a seller order or
+filter offers, but the returned challenge is always authoritative.
 
 ## Challenge
 
-Unpaid requests receive `402 Payment Required` with one or more `WWW-Authenticate: Payment` headers. Each challenge includes:
+```http
+HTTP/1.1 402 Payment Required
+Cache-Control: no-store
+WWW-Authenticate: Payment id="...", realm="merchant.example", method="xrpl", intent="charge", request="...", expires="...", header="Payment-Authorization", opaque="..."
+Content-Type: application/problem+json
+```
 
-- `id`
-- `realm`
-- `method="xrpl"`
-- `intent="charge"` or `intent="session"`
-- `request`
-- optional `digest`, `expires`, `description`, and `opaque`
+A response can contain multiple Payment challenges. The required challenge
+parameters are `id`, `realm`, `method`, `intent`, and `request`. The `request`
+and optional `opaque` values are unpadded base64url encodings of RFC 8785
+canonical JSON. `opaque`, when present, is a flat map of string keys to string
+values. `expires` is an RFC 3339 timestamp.
 
-The `request` value is base64url-encoded canonical JSON. For XRPL charge routes it contains:
+This stack HMAC-binds challenge fields using `opaque`. The HMAC is conditional:
+generic MPP peers do not need to emit it, but a challenge issued by this stack
+must verify before settlement.
 
-- `amount`
-- `currency`
-- `recipient`
-- `methodDetails.network`
-- `methodDetails.invoiceId`
+## Credential field
 
-For session routes it contains:
-
-- `amount`
-- `currency`
-- `recipient`
-- `methodDetails.network`
-- `methodDetails.sessionId`
-- `methodDetails.unitAmount`
-- `methodDetails.minPrepayAmount`
-
-In this release, fixed-price session routes require `methodDetails.unitAmount` to match `amount`.
-
-## Authorization
-
-Paid retries send:
+When `header` is absent, use the default field:
 
 ```http
 Authorization: Payment <base64url-jcs-credential>
 ```
 
-The credential contains the selected challenge plus a method-specific payload:
+When the challenge contains `header="Payment-Authorization"`, use exactly:
 
-- `charge`: `signedTxBlob`
-- `session open`: `action="open"` and `signedTxBlob`
-- `session use`: `action="use"` and `sessionToken`
-- `session top_up`: `action="top_up"`, `sessionToken`, and `signedTxBlob`
-- `session close`: `action="close"` and `sessionToken`
+```http
+Authorization: Bearer <ordinary-application-token>
+Payment-Authorization: Payment <base64url-jcs-credential>
+```
+
+The selected `header` is echoed inside the credential's challenge object. Do
+not copy a credential between the two fields. Selecting
+`Payment-Authorization` prevents the payment exchange from replacing ordinary
+application authentication.
+
+The decoded credential has this core shape:
+
+```json
+{
+  "challenge": { "id": "...", "method": "xrpl", "intent": "charge" },
+  "payload": { "type": "transaction", "blob": "..." },
+  "source": "did:xrpl:testnet:r..."
+}
+```
+
+The full challenge is echoed, not only its ID.
 
 ## Receipt
 
-Successful paid responses include:
+On a successful paid response, the server should include:
 
 ```http
 Payment-Receipt: <base64url-jcs-receipt>
+Cache-Control: private
 ```
 
-Receipts include common fields such as:
+The required decoded fields are `status: "success"`, `method`, `timestamp`, and
+`reference`. XRPL extensions can include `challengeId`, `network`, `payer`,
+`recipient`, `invoiceId`, `channelId`, `cumulative`, `action`, `txHash`, and
+`settlementStatus`.
 
-- `method`
-- `timestamp`
-- `reference`
-- `intent`
-- `network`
-- `payer`
-- `recipient`
-
-Charge receipts also include `invoiceId`, `txHash`, `settlementStatus`, `asset`, and `amount`.
-
-Session receipts may include `sessionId`, `sessionToken`, `spentTotal`, `availableBalance`, `prepaidTotal`, and `lastAction`.
+Never emit `Payment-Receipt` on an error response. Treat receipt headers as
+sensitive payment metadata in logs, caches, and browser exposure policy.

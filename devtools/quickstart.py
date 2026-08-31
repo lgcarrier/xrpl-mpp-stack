@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import secrets
 from pathlib import Path
 from typing import Sequence
@@ -18,8 +19,6 @@ DEFAULT_OUTPUT_PATH = Path(".env.quickstart")
 DEFAULT_PRICE_DROPS = 1000
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
 DEFAULT_MPP_CHALLENGE_TTL_SECONDS = 300
-DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS = 900
-DEFAULT_SESSION_STATE_TTL_SECONDS = 604800
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -74,25 +73,25 @@ def render_quickstart_env(
         "# Contains secrets for local XRPL Testnet demos. Do not commit this file.",
         "GATEWAY_AUTH_MODE=single_token",
         f"XRPL_RPC_URL={xrpl_rpc_url}",
-        "NETWORK_ID=xrpl:1",
-        "XRPL_NETWORK=xrpl:1",
+        "NETWORK_ID=testnet",
+        "XRPL_NETWORK=testnet",
         "SETTLEMENT_MODE=validated",
         f"MY_DESTINATION_ADDRESS={merchant_wallet.classic_address}",
         f"FACILITATOR_BEARER_TOKEN={facilitator_token}",
         f"REDIS_URL={DEFAULT_REDIS_URL}",
         f"XRPL_WALLET_SEED={buyer_seed}",
+        f"XRPL_MPP_EXPECTED_RECIPIENT={merchant_wallet.classic_address}",
+        f"XRPL_MPP_MAX_SPEND={format(Decimal(price_drops) / Decimal('1000000'), 'f')}",
         f"MPP_CHALLENGE_SECRET={mpp_challenge_secret}",
         f"MPP_CHALLENGE_TTL_SECONDS={DEFAULT_MPP_CHALLENGE_TTL_SECONDS}",
-        f"SESSION_IDLE_TIMEOUT_SECONDS={DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS}",
-        f"SESSION_STATE_TTL_SECONDS={DEFAULT_SESSION_STATE_TTL_SECONDS}",
-        f"PRICE_DROPS={price_drops}",
-        "PRICE_ASSET_CODE=XRP",
-        "PRICE_ASSET_ISSUER=",
-        "PRICE_ASSET_AMOUNT=",
-        "PAYMENT_ASSET=XRP:native",
+        f"PRICE_AMOUNT={price_drops}",
+        "PRICE_CURRENCY=XRP",
+        "PAYMENT_CURRENCY=XRP",
+        "ALLOWED_ISSUED_ASSETS=",
+        "ALLOWED_MPT_ISSUANCE_IDS=",
         "",
-        "# To demo RLUSD, set PRICE_ASSET_CODE/ISSUER/AMOUNT and PAYMENT_ASSET accordingly.",
-        "# To demo USDC, set PRICE_ASSET_CODE/ISSUER/AMOUNT and PAYMENT_ASSET accordingly.",
+        "# Issued currencies use compact JSON on the MPP wire.",
+        "# Generate ready-to-run variants with `python -m devtools.demo_env --asset rlusd`.",
         "",
     ]
     return "\n".join(lines)
@@ -148,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Wallet cache: {wallet_cache_path()}")
     print("Next steps:")
     print(f"  docker compose --env-file {output_path} up --build")
-    print(f"  docker compose --env-file {output_path} run --rm --profile demo buyer")
+    print(f"  docker compose --env-file {output_path} --profile demo run --rm buyer")
     print("Asset follow-ups:")
     print("  python -m devtools.rlusd_topup")
     print("  python -m devtools.usdc_topup")

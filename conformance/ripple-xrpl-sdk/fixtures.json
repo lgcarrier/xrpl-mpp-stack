@@ -1,0 +1,135 @@
+{
+  "source": {
+    "repository": "https://github.com/ripple/xrpl-mpp-sdk",
+    "commit": "6907484c92d217da406e2f3d7b5e6587703c6ea8",
+    "packageVersion": "0.1.0",
+    "generator": "conformance/ripple-xrpl-sdk/generate-fixtures.ts"
+  },
+  "constants": {
+    "payer": "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
+    "recipient": "rf5kMNrUqgLzJT8YUzxM1pptc5r3Lfx1J9",
+    "channelId": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+    "signature": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD",
+    "txHash": "EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF",
+    "timestamp": "2026-08-30T12:00:00Z"
+  },
+  "invoiceId": {
+    "challengeId": "charge-fixture-001",
+    "value": "61A859A7D77E0781B5A4B1A3B84F3DD7B63ABA57A72B232D3EFBFBBC0D24DB3D"
+  },
+  "charge": {
+    "method": {
+      "name": "xrpl",
+      "intent": "charge"
+    },
+    "request": {
+      "amount": "1000000",
+      "currency": "XRP",
+      "recipient": "rf5kMNrUqgLzJT8YUzxM1pptc5r3Lfx1J9",
+      "description": "deterministic charge fixture",
+      "externalId": "order-001",
+      "methodDetails": {
+        "reference": "charge-reference-001",
+        "network": "testnet",
+        "invoiceId": "0101010101010101010101010101010101010101010101010101010101010101",
+        "destinationTag": 7,
+        "sourceTag": 593184257,
+        "memos": [
+          {
+            "type": "text/plain",
+            "data": "order-001"
+          }
+        ]
+      }
+    },
+    "payloads": {
+      "transaction": {
+        "blob": "12000022",
+        "type": "transaction"
+      },
+      "hash": {
+        "hash": "EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF",
+        "type": "hash"
+      }
+    },
+    "receipt": {
+      "method": "xrpl",
+      "reference": "EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF",
+      "externalId": "charge-fixture-001",
+      "status": "success",
+      "timestamp": "2026-08-30T12:00:00Z"
+    }
+  },
+  "session": {
+    "method": {
+      "name": "xrpl",
+      "intent": "session"
+    },
+    "request": {
+      "amount": "50000",
+      "currency": "XRP",
+      "channelId": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+      "recipient": "rf5kMNrUqgLzJT8YUzxM1pptc5r3Lfx1J9",
+      "description": "deterministic session fixture",
+      "externalId": "session-001",
+      "methodDetails": {
+        "reference": "session-reference-001",
+        "network": "testnet",
+        "cumulativeAmount": "200000"
+      }
+    },
+    "openRequest": {
+      "amount": "0",
+      "currency": "XRP",
+      "channelId": "",
+      "recipient": "rf5kMNrUqgLzJT8YUzxM1pptc5r3Lfx1J9",
+      "methodDetails": {
+        "network": "testnet",
+        "cumulativeAmount": "0"
+      }
+    },
+    "payloads": {
+      "open": {
+        "action": "open",
+        "transaction": "12000022",
+        "amount": "0",
+        "signature": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "voucher": {
+        "action": "voucher",
+        "channelId": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "amount": "250000",
+        "signature": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "close": {
+        "action": "close",
+        "channelId": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "amount": "250000",
+        "signature": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    "receipts": {
+      "open": {
+        "method": "xrpl",
+        "reference": "open:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB:EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF",
+        "externalId": "session-open-fixture-001",
+        "status": "success",
+        "timestamp": "2026-08-30T12:00:00Z"
+      },
+      "voucher": {
+        "method": "xrpl",
+        "reference": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB:250000",
+        "externalId": "session-voucher-fixture-001",
+        "status": "success",
+        "timestamp": "2026-08-30T12:00:00Z"
+      },
+      "close": {
+        "method": "xrpl",
+        "reference": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB:250000",
+        "externalId": "session-close-fixture-001",
+        "status": "success",
+        "timestamp": "2026-08-30T12:00:00Z"
+      }
+    }
+  }
+}

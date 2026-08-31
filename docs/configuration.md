@@ -1,125 +1,121 @@
 # Configuration
 
-`.env.example` is the canonical starting point for local development, Docker
-Compose demos, and operator handoff. The facilitator reads `.env` automatically
-through Pydantic settings, and the local examples reuse the same variables.
+Copy `.env.example` to `.env` and replace every placeholder. The exact template
+in the repository is authoritative for the current checkout.
 
-## Common Local Testnet Profile
+## Facilitator
 
-The quickstart generates `.env.quickstart` for you, but the equivalent values look like:
+| Variable | Purpose |
+| --- | --- |
+| `GATEWAY_AUTH_MODE` | `single_token` or Redis-backed gateway authentication |
+| `FACILITATOR_BEARER_TOKEN` | Seller-to-facilitator bearer token in single-token mode |
+| `REDIS_URL` | Replay reservations, rate-limit state, and PaymentChannel high-water records |
+| `XRPL_RPC_URL` | Trusted XRPL JSON-RPC endpoint; HTTPS is required by default |
+| `ALLOW_INSECURE_XRPL_RPC` | Development-only opt-in for an HTTP endpoint on localhost or a loopback IP |
+| `NETWORK_ID` | `mainnet`, `testnet`, or `devnet` |
+| `MY_DESTINATION_ADDRESS` | Required payment recipient |
+| `SETTLEMENT_MODE` | Must be `validated`; other values are rejected |
+| `VALIDATION_TIMEOUT` | Ledger validation polling timeout |
+| `MIN_XRP_DROPS` | Minimum accepted XRP charge |
+| `ALLOWED_ISSUED_ASSETS` | Explicit issued-currency allowlist |
+| `ALLOWED_MPT_ISSUANCE_IDS` | Explicit MPT issuance-ID allowlist |
+| `MAX_PAYMENT_LEDGER_WINDOW` | Accepted transaction freshness window |
+| `REPLAY_PROCESSED_TTL_SECONDS` | Completed replay-marker retention |
+| `MAX_REQUEST_BODY_BYTES` | Facilitator payment-endpoint body limit |
+| `ENABLE_API_DOCS` | Expose FastAPI docs only when operationally appropriate |
 
-```bash
-NETWORK_ID=xrpl:1
-XRPL_NETWORK=xrpl:1
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-SETTLEMENT_MODE=validated
-GATEWAY_AUTH_MODE=single_token
-```
+`ALLOW_INSECURE_XRPL_RPC=true` never permits plaintext RPC to a remote host; it
+only admits `http://localhost` or a loopback IP for a locally operated rippled.
+Use HTTPS for Testnet, Devnet, Mainnet, containers, and remote/internal network
+hosts.
 
-For local demos, keep `SETTLEMENT_MODE=validated` unless you are intentionally
-testing lower-latency optimistic settlement behavior.
+## Challenge binding
 
-## Facilitator Runtime
+| Variable | Purpose |
+| --- | --- |
+| `MPP_CHALLENGE_SECRET` | Active HMAC key for newly issued challenges |
+| `MPP_CHALLENGE_PREVIOUS_SECRETS` | Comma-separated verification-only rotation keys |
+| `MPP_CHALLENGE_TTL_SECONDS` | Challenge lifetime |
+| `MPP_DEFAULT_REALM` | Optional middleware realm override |
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `GATEWAY_AUTH_MODE` | `single_token` | Chooses either one shared bearer token or Redis-backed public gateway auth. |
-| `XRPL_RPC_URL` | `https://s1.ripple.com:51234` | JSON-RPC endpoint used by the facilitator to inspect and submit XRPL transactions. |
-| `MY_DESTINATION_ADDRESS` | required | XRPL address that receives settled payments. |
-| `FACILITATOR_BEARER_TOKEN` | required in `single_token` mode | Shared secret that seller middleware uses to call the facilitator. |
-| `REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis database for replay markers, gateway metadata, and session state. |
-| `NETWORK_ID` | `xrpl:0` | CAIP-2 network id the facilitator advertises and validates against. |
-| `SETTLEMENT_MODE` | `validated` | Wait for validation before success, or return early in `optimistic` mode. |
-| `VALIDATION_TIMEOUT` | `15` | Maximum seconds to wait for on-ledger validation in `validated` mode. |
-| `MIN_XRP_DROPS` | `1000` | Minimum XRP amount accepted for native-XRP payments. |
-| `ALLOWED_ISSUED_ASSETS` | empty | Extra `CODE:ISSUER` pairs accepted beyond the built-in RLUSD and USDC issuers. |
-| `ENABLE_API_DOCS` | `false` | Enables FastAPI docs UI. Keep this off for public deployments unless you explicitly want it. |
+Deploy the active secret to issuers and verifiers together. During rotation,
+issue with the first key and verify with the active plus previous keys. Remove
+old keys only after every challenge they signed has expired.
 
-## MPP Challenge, Replay, And Session Controls
+## Payment Channels
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MPP_CHALLENGE_SECRET` | required | Shared HMAC secret used to bind challenges to requests. |
-| `MPP_DEFAULT_REALM` | unset | Optional override for the challenge `realm` shown to buyers. |
-| `MPP_CHALLENGE_TTL_SECONDS` | `300` | Challenge expiry window used by middleware and facilitator. |
-| `MAX_REQUEST_BODY_BYTES` | `32768` | Rejects oversized protected requests before facilitator or app handling. |
-| `REPLAY_PROCESSED_TTL_SECONDS` | `604800` | TTL, in seconds, for processed replay markers. |
-| `MAX_PAYMENT_LEDGER_WINDOW` | `20` | Maximum ledger window allowed in `redis_gateways` mode. |
-| `SESSION_IDLE_TIMEOUT_SECONDS` | `900` | Idle timeout for MPP `session` balances. |
-| `SESSION_STATE_TTL_SECONDS` | `604800` | Redis TTL for persisted session-state records. |
+| Variable | Purpose |
+| --- | --- |
+| `PAYCHANNEL_PAYER_PUBLIC_KEY` | Required funder claim-key allowlist for enabling `/session` |
+| `PAYCHANNEL_RECIPIENT_SEED` | Optional recipient wallet seed for validated server-side claim redemption |
+| `PAYCHANNEL_MIN_SETTLE_DELAY` | Minimum acceptable on-ledger `SettleDelay`, in seconds |
+| `PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS` | Refuse claims this close to `Expiration` or `CancelAfter` |
+| `PAYCHANNEL_MAX_REDEMPTION_FEE_DROPS` | Maximum unattended recipient-claim fee, in drops |
+| `PAYCHANNEL_REDEEM_INTERVAL_SECONDS` | Background redemption interval; `0` disables the worker |
+| `PAYCHANNEL_IDLE_CLOSE_SECONDS` | Finalize inactive MPP sessions after this age; `0` disables idle finalization |
+| `PAYCHANNEL_REDEEM_BATCH_SIZE` | Maximum channel records inspected per worker interval (maximum `1000`) |
+| `PAYCHANNEL_REDEEM_LEASE_SECONDS` | Per-channel Redis lease; effective minimum is `VALIDATION_TIMEOUT + 60` |
 
-## Demo And Docker Compose Variables
+Session routes currently support XRP channels. The open transaction must match
+the network, payer, recipient, public key, funding, settle-delay, and expiry
+policies; cumulative claims must strictly advance. If the seed is configured,
+it must derive `MY_DESTINATION_ADDRESS`. Keep it in a secret manager, never in
+source control or logs.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `FACILITATOR_PORT` | `8000` | Host port override for the facilitator service in Docker Compose. |
-| `MERCHANT_PORT` | `8010` | Host port override for the merchant example service in Docker Compose. |
-| `XRPL_WALLET_SEED` | empty | Buyer wallet seed used by the examples and real payer flows. |
-| `PRICE_DROPS` | `1000` | XRP price for the merchant example when using native XRP. |
-| `PRICE_ASSET_CODE` | `XRP` | Merchant example asset code. Set this to `RLUSD` or `USDC` for issued-asset demos. |
-| `PRICE_ASSET_ISSUER` | empty | Issuer address for the merchant example when pricing in an issued asset. |
-| `PRICE_ASSET_AMOUNT` | empty | Merchant example amount when pricing in an issued asset. |
-| `PAYMENT_ASSET` | `XRP:native` | Buyer-side asset identifier used by the examples and payer. |
+For KMS/HSM deployments, construct `XRPLService` with an injected
+`RecipientSigner` instead of setting `PAYCHANNEL_RECIPIENT_SEED`. The signer
+receives a fully prepared `PaymentChannelClaim` and returns its signed form;
+the facilitator verifies that no transaction field changed. The seed and
+injected signer modes are mutually exclusive.
 
-## Buyer And Payer Variables
+MPP `close` is a final voucher. With a recipient signer, the facilitator submits
+a recipient-signed `PaymentChannelClaim`, waits for validated success, and marks
+the durable record redeemed/finalized. That transaction does not set `tfClose`,
+refund unused XRP, or delete the channel. Without a recipient signer, the MPP
+session is durably finalized and the final voucher is retained off-ledger for a
+separate redemption workflow; no on-ledger close is claimed.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `XRPL_NETWORK` | unset by the package, usually set in `.env` | Buyer-side CAIP-2 network id used for signing and challenge selection. |
-| `XRPL_MPP_MAX_SPEND` | unset | Global spend cap used by `xrpl-mpp` budget checks when `--max-spend` is not passed. |
-| `XRPL_MPP_RECEIPTS_PATH` | default local receipt store | Optional path override for payer receipt persistence. |
+The optional background worker proactively redeems outstanding cumulative
+claims. If `PAYCHANNEL_IDLE_CLOSE_SECONDS` is configured, it also finalizes an
+inactive MPP session after successful redemption (or immediately when the
+stored cumulative is already redeemed). Multiple replicas coordinate with a
+Redis lease. Ambiguous failures keep that lease until expiry before retrying.
+Neither explicit nor background recipient redemption sets `tfClose`; the funder
+retains control of the XRPL channel-close/refund lifecycle.
 
-The payer resolves its network in this order:
+`PaymentChannelFund` is not an MPP action. Submit it directly through XRPL, then
+send a later voucher; validated ledger verification refreshes the increased
+funding before advancing the high-water mark. A channel opened outside the MPP
+flow can likewise be imported on its first voucher/close when its validated
+ledger parties, key, funding, settle delay, and expiry satisfy policy.
 
-1. explicit `network=` or CLI/runtime override
-2. `XRPL_NETWORK`
-3. `NETWORK_ID`
-4. built-in fallback `xrpl:1`
+There are no 0.2 settings for an application session timeout, reusable session
+credential, request counter, or stored prepaid balance.
 
-That default makes the turnkey payer friendlier for Testnet demos, but in a
-production deployment you should set `XRPL_NETWORK` and `XRPL_RPC_URL`
-explicitly.
+## Buyer policy
 
-## Asset Configuration Examples
+| Variable | Purpose |
+| --- | --- |
+| `XRPL_MPP_EXPECTED_RECIPIENT` | Operator-approved recipient used by the payer CLI/proxy/MCP server before automatic signing |
+| `XRPL_MPP_MAX_SPEND` | Optional payer CLI/proxy ceiling in user asset units; required with the recipient for non-dry-run MCP tools |
+| `XRPL_MPP_RECEIPTS_PATH` | Optional local payer receipt-store path |
+| `XRPL_MPP_MAX_FEE_DROPS` | Maximum final autofilled XRPL transaction fee in drops; default `1000` |
+| `XRPL_MPP_IOU_SOURCE_CURRENCY` | Explicit XRP or issued source asset authorized for IOU pathfinding |
+| `XRPL_MPP_IOU_MAX_SOURCE_AMOUNT` | Absolute source-side spend ceiling paired with the source currency |
+| `XRPL_MPP_IOU_SLIPPAGE_BPS` | Source quote buffer from `0` to `1000` basis points; default `50` |
 
-Native XRP demo:
+Buyer code should configure the signer with an expected recipient, maximum
+amount, allowed currencies, network, and trusted RPC endpoint. The payer fails
+closed unless `--recipient` or `XRPL_MPP_EXPECTED_RECIPIENT` supplies the
+operator-approved destination. The transport requires HTTPS except for
+loopback development with the explicit `allow_insecure_localhost=True` opt-in,
+and sends at most one paid retry.
 
-```bash
-PRICE_DROPS=1000
-PAYMENT_ASSET=XRP:native
-```
+The payer MCP tools load their recipient and ceiling only from process
+configuration; model-generated tool arguments cannot replace either value.
+Client examples convert an XRP `XRPL_MPP_MAX_SPEND` value to drops before
+constructing the lower-level wire-amount policy. Their local `PRICE_AMOUNT`
+fallback is already expressed in MPP wire units.
 
-RLUSD demo:
-
-```bash
-PRICE_ASSET_CODE=RLUSD
-PRICE_ASSET_ISSUER=rIssuerForRlusd
-PRICE_ASSET_AMOUNT=0.001
-PAYMENT_ASSET=RLUSD:rIssuerForRlusd
-```
-
-USDC demo:
-
-```bash
-PRICE_ASSET_CODE=USDC
-PRICE_ASSET_ISSUER=rIssuerForUsdc
-PRICE_ASSET_AMOUNT=0.001
-PAYMENT_ASSET=USDC:rIssuerForUsdc
-```
-
-For the built-in Testnet and Mainnet RLUSD or USDC issuers, you can usually use
-the repo helpers instead of hardcoding issuer values by hand:
-
-- `python -m devtools.demo_env --asset rlusd`
-- `python -m devtools.demo_env --asset usdc`
-
-## Deployment Notes
-
-- `FACILITATOR_BEARER_TOKEN` is required only when `GATEWAY_AUTH_MODE=single_token`.
-- `REDIS_URL` is still required in both auth modes because replay and session state live in Redis.
-- `ENABLE_API_DOCS=true` is best kept to local development or trusted internal environments.
-- `MPP_CHALLENGE_SECRET` should be shared between the middleware that emits challenges and the facilitator that validates them.
-- `redis_gateways` mode adds stricter `LastLedgerSequence` freshness checks. See [Replay And Freshness](how-it-works/replay-and-freshness.md) before enabling it on public traffic.
-
-For concrete examples grouped by deployment shape, continue to
-[Deployment Modes](configuration/deployment-modes.md).
+Never log or commit wallet seeds, signed blobs, payment credentials, facilitator
+bearer tokens, or HMAC secrets.

@@ -16,6 +16,7 @@
   - `packages/middleware` -> `xrpl-mpp-middleware`
   - `packages/client` -> `xrpl-mpp-client`
   - `packages/payer` -> `xrpl-mpp-payer`
+  - `packages/mcp` -> `xrpl-mpp-mcp`
 - Facilitator entry point: `xrpl_mpp_facilitator.main:app`
 - Facilitator app factory: `xrpl_mpp_facilitator.factory:create_app`
 
@@ -35,7 +36,7 @@
 - Compile-check source: `PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools`
 - Build hosted docs: `mkdocs build --strict`
 - Build all package artifacts:
-  - `for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do ( cd "$package" && python -m build --sdist && python -m build --wheel ); done`
+  - `for package in packages/core packages/facilitator packages/middleware packages/client packages/payer packages/mcp; do ( cd "$package" && python -m build --sdist && python -m build --wheel ); done`
 - Verify package metadata: `twine check packages/*/dist/*`
 - Smoke facilitator CLI: `xrpl-mpp-facilitator --help`
 - Build Docker image: `docker build -t xrpl-mpp-facilitator .`
@@ -60,7 +61,7 @@
   - `pytest`
   - `RUN_XRPL_TESTNET_LIVE=1 pytest -m live tests/integration/test_live_testnet.py -s`
 - If changing packaging, release automation, package metadata, or publish docs, also run:
-  - `for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do ( cd "$package" && python -m build --sdist && python -m build --wheel ); done`
+  - `for package in packages/core packages/facilitator packages/middleware packages/client packages/payer packages/mcp; do ( cd "$package" && python -m build --sdist && python -m build --wheel ); done`
   - `twine check packages/*/dist/*`
   - `PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools`
 - If changing docs, onboarding, or GitHub Pages deployment, also run:

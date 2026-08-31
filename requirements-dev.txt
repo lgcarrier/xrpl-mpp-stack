@@ -3,6 +3,7 @@
 -e ./packages/middleware
 -e ./packages/client
 -e ./packages/payer
+-e ./packages/mcp
 build>=1.4.4,<2
 editables>=0.6
 hatchling>=1.29.0

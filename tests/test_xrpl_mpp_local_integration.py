@@ -5,20 +5,31 @@ import asyncio
 from fastapi import FastAPI, Request
 import httpx
 from slowapi import Limiter as SlowLimiter
+from xrpl.core import binarycodec
+from xrpl.models.transactions import Payment
 from xrpl.wallet import Wallet
 
 import xrpl_mpp_facilitator.factory as factory_module
-from xrpl_mpp_client import XRPLPaymentSigner, decode_payment_receipt_header, wrap_httpx_with_mpp_payment
-from xrpl_mpp_core import FacilitatorSupportedMethod, PaymentReceipt, XRPLAsset
+from xrpl_mpp_client import (
+    XRPLPaymentPolicy,
+    XRPLPaymentSigner,
+    decode_payment_receipt_header,
+    wrap_httpx_with_mpp_payment,
+)
+from xrpl_mpp_core import (
+    FacilitatorSupportedMethod,
+    PaymentReceipt,
+    challenge_invoice_id,
+    decode_charge_payload,
+    decode_challenge_request,
+)
 from xrpl_mpp_facilitator.config import Settings
 from xrpl_mpp_facilitator.factory import create_app
-from xrpl_mpp_middleware import XRPLFacilitatorClient
-from xrpl_mpp_middleware.middleware import PaymentMiddlewareASGI, require_payment
+from xrpl_mpp_middleware import ChargeRouteSpec, RouteConfig, XRPLFacilitatorClient
+from xrpl_mpp_middleware.middleware import PaymentMiddlewareASGI
 
 FACILITATOR_TOKEN = "local-facilitator-token"
 DESTINATION = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
-PAYER = "rLOCALPAYER123456789"
-TX_HASH = "LOCAL-TX-HASH-123"
 CHALLENGE_SECRET = "integration-test-secret"
 
 
@@ -31,28 +42,37 @@ class RecordingXRPLService:
             FacilitatorSupportedMethod(
                 method="xrpl",
                 intents=["charge", "session"],
-                network="xrpl:1",
-                assets=[XRPLAsset(code="XRP")],
+                network="testnet",
+                currencies=["XRP"],
                 settlementMode="validated",
             )
         ]
 
     async def charge(self, credential) -> PaymentReceipt:
         self.charge_calls.append(credential)
+        payload = decode_charge_payload(credential)
+        assert payload.type == "transaction"
+        transaction = Payment.from_xrpl(binarycodec.decode(payload.blob))
+        terms = decode_challenge_request(credential.challenge)
+        details = terms.method_details
+        invoice_id = (
+            details.invoice_id
+            if details is not None and details.invoice_id is not None
+            else challenge_invoice_id(credential.challenge.id)
+        )
+        tx_hash = transaction.get_hash().upper()
         return PaymentReceipt(
+            status="success",
             method="xrpl",
             timestamp="2026-03-21T12:00:00Z",
-            reference=TX_HASH,
+            reference=tx_hash,
             challengeId=credential.challenge.id,
-            intent="charge",
-            network="xrpl:1",
-            payer=PAYER,
-            recipient=DESTINATION,
-            invoiceId="A" * 32,
-            txHash=TX_HASH,
+            network="testnet",
+            payer=transaction.account,
+            recipient=terms.recipient,
+            invoiceId=invoice_id,
+            txHash=tx_hash,
             settlementStatus="validated",
-            asset={"code": "XRP"},
-            amount={"value": "1000", "unit": "drops", "asset": {"code": "XRP"}, "drops": 1000},
         )
 
     async def session(self, credential) -> PaymentReceipt:
@@ -86,7 +106,7 @@ def test_middleware_uses_real_local_facilitator_instance() -> None:
         XRPL_RPC_URL="https://s.altnet.rippletest.net:51234",
         MY_DESTINATION_ADDRESS=DESTINATION,
         REDIS_URL="redis://fake:6379/0",
-        NETWORK_ID="xrpl:1",
+        NETWORK_ID="testnet",
         SETTLEMENT_MODE="validated",
         FACILITATOR_BEARER_TOKEN=FACILITATOR_TOKEN,
         MPP_CHALLENGE_SECRET=CHALLENGE_SECRET,
@@ -115,13 +135,18 @@ def test_middleware_uses_real_local_facilitator_instance() -> None:
     middleware_app.add_middleware(
         PaymentMiddlewareASGI,
         route_configs={
-            "GET /paid": require_payment(
-                facilitator_url="http://facilitator.local",
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Local facilitator integration route",
+            "GET /paid": RouteConfig(
+                facilitatorUrl="http://facilitator.local",
+                bearerToken=FACILITATOR_TOKEN,
+                chargeOptions=[
+                    ChargeRouteSpec(
+                        recipient=DESTINATION,
+                        network="testnet",
+                        currency="XRP",
+                        amount="1000",
+                        description="Local facilitator integration route",
+                    )
+                ],
             )
         },
         challenge_secret=CHALLENGE_SECRET,
@@ -129,12 +154,13 @@ def test_middleware_uses_real_local_facilitator_instance() -> None:
             base_url=facilitator_url,
             bearer_token=bearer_token,
             async_client=async_facilitator_client,
+            allow_insecure_http=True,
         ),
     )
 
     signer = XRPLPaymentSigner(
         Wallet.create(),
-        network="xrpl:1",
+        network="testnet",
         autofill_enabled=False,
     )
 
@@ -143,8 +169,14 @@ def test_middleware_uses_real_local_facilitator_instance() -> None:
         async with wrap_httpx_with_mpp_payment(
             signer,
             transport=transport,
-            base_url="http://merchant.local",
-            asset="XRP:native",
+            base_url="http://127.0.0.1",
+            currency="XRP",
+            payment_policy=XRPLPaymentPolicy(
+                expected_recipients=DESTINATION,
+                max_amount="1000",
+                allowed_currencies={"XRP"},
+            ),
+            allow_insecure_localhost=True,
         ) as client:
             response = await client.get("/paid")
         await async_facilitator_client.aclose()
@@ -153,12 +185,12 @@ def test_middleware_uses_real_local_facilitator_instance() -> None:
     response = asyncio.run(_make_paid_request())
 
     assert response.status_code == 200
-    assert response.json() == {
-        "reference": TX_HASH,
-        "tx_hash": TX_HASH,
-        "payer": PAYER,
-    }
+    response_body = response.json()
+    assert response_body["reference"] == response_body["tx_hash"]
+    assert len(response_body["tx_hash"]) == 64
+    assert set(response_body["tx_hash"]) <= set("0123456789ABCDEF")
+    assert response_body["payer"] == signer.wallet.classic_address
     payment_receipt = decode_payment_receipt_header(response.headers)
     assert payment_receipt is not None
-    assert payment_receipt.tx_hash == TX_HASH
+    assert payment_receipt.tx_hash == response_body["tx_hash"]
     assert len(facilitator_service.charge_calls) == 1

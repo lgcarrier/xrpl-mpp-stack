@@ -33,6 +33,12 @@ def create_proxy_app(
     issuer: str | None = None,
     max_spend: float | None = None,
     dry_run: bool = False,
+    intent: str | None = None,
+    channel_id: str | None = None,
+    cumulative_amount: str = "0",
+    open_transaction: str | None = None,
+    channel_funding_amount: str | None = None,
+    expected_recipient: str | None = None,
     transport=None,
     store: ReceiptStore | None = None,
     payer: XRPLPayer | None = None,
@@ -40,6 +46,7 @@ def create_proxy_app(
     active_payer = payer or XRPLPayer(
         None if dry_run else build_signer_from_env(),
         store=store,
+        expected_recipient=expected_recipient,
     )
     normalized_target = target_base_url.rstrip("/")
 
@@ -67,6 +74,12 @@ def create_proxy_app(
             issuer=issuer,
             max_spend=max_spend,
             dry_run=dry_run,
+            intent=intent,
+            channel_id=channel_id,
+            cumulative_amount=cumulative_amount,
+            open_transaction=open_transaction,
+            channel_funding_amount=channel_funding_amount,
+            expected_recipient=expected_recipient,
             transport=transport,
         )
         response_headers = {
@@ -101,6 +114,12 @@ def run_proxy(
     issuer: str | None = None,
     max_spend: float | None = None,
     dry_run: bool = False,
+    intent: str | None = None,
+    channel_id: str | None = None,
+    cumulative_amount: str = "0",
+    open_transaction: str | None = None,
+    channel_funding_amount: str | None = None,
+    expected_recipient: str | None = None,
 ) -> None:
     app = create_proxy_app(
         target_base_url=target_base_url,
@@ -109,6 +128,12 @@ def run_proxy(
         issuer=issuer,
         max_spend=max_spend,
         dry_run=dry_run,
+        intent=intent,
+        channel_id=channel_id,
+        cumulative_amount=cumulative_amount,
+        open_transaction=open_transaction,
+        channel_funding_amount=channel_funding_amount,
+        expected_recipient=expected_recipient,
     )
     uvicorn.run(app, host=host, port=port, log_level="info")
 
@@ -132,6 +157,12 @@ class ProxyManager:
         issuer: str | None = None,
         max_spend: float | None = None,
         dry_run: bool = False,
+        intent: str | None = None,
+        channel_id: str | None = None,
+        cumulative_amount: str = "0",
+        open_transaction: str | None = None,
+        channel_funding_amount: str | None = None,
+        expected_recipient: str | None = None,
     ) -> str:
         with self._lock:
             normalized_target_base_url = target_base_url.rstrip("/")
@@ -144,6 +175,12 @@ class ProxyManager:
                 issuer,
                 max_spend,
                 dry_run,
+                intent,
+                channel_id,
+                cumulative_amount,
+                open_transaction,
+                channel_funding_amount,
+                expected_recipient,
             )
             if self._server is not None:
                 if self._config_signature == config_signature:
@@ -159,6 +196,12 @@ class ProxyManager:
                 issuer=issuer,
                 max_spend=max_spend,
                 dry_run=dry_run,
+                intent=intent,
+                channel_id=channel_id,
+                cumulative_amount=cumulative_amount,
+                open_transaction=open_transaction,
+                channel_funding_amount=channel_funding_amount,
+                expected_recipient=expected_recipient,
             )
             config = uvicorn.Config(app, host=host, port=port, log_level="warning")
             server = uvicorn.Server(config)

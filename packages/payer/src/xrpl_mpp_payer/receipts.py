@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
-from xrpl_mpp_core import getenv_clean
+from xrpl_mpp_core import XRPLNetwork, getenv_clean, parse_currency
 
 
 DEFAULT_RECEIPTS_PATH = Path.home() / ".xrpl-mpp" / "receipts.jsonl"
@@ -13,23 +13,37 @@ RECEIPTS_PATH_ENV = "XRPL_MPP_RECEIPTS_PATH"
 
 
 class ReceiptRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Local audit record derived from MPP 0.2 challenge and receipt data.
+
+    Core MPP receipts intentionally contain only settlement identity.  Currency
+    and the incremental amount are therefore recorded from the authenticated
+    challenge that produced the receipt, not from legacy receipt extensions.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     created_at: str
     url: str
     method: str
     status_code: int
-    network: str
-    asset_identifier: str
+    network: XRPLNetwork
+    currency: str
     amount: str
     payer: str
-    tx_hash: str
+    reference: str
     settlement_status: str
+    intent: str
+    action: str | None = None
+    channel_id: str | None = None
+    cumulative: str | None = None
+    transaction_hash: str | None = None
+
+    def model_post_init(self, __context: object) -> None:
+        parse_currency(self.currency)
 
     @property
     def amount_decimal(self) -> Decimal:
         return Decimal(self.amount)
-
 
 def receipt_store_path() -> Path:
     raw_path = getenv_clean(RECEIPTS_PATH_ENV)
@@ -64,17 +78,18 @@ class ReceiptStore:
     def budget_summary(
         self,
         *,
-        asset_identifier: str,
+        currency: str,
         max_spend: Decimal | None = None,
     ) -> dict[str, str | None]:
+        parse_currency(currency)
         spent = sum(
             receipt.amount_decimal
             for receipt in self.list(limit=10_000)
-            if receipt.asset_identifier == asset_identifier
+            if receipt.currency == currency
         )
         remaining = max_spend - spent if max_spend is not None else None
         return {
-            "asset_identifier": asset_identifier,
+            "currency": currency,
             "spent": _format_decimal(spent),
             "max_spend": _format_decimal(max_spend) if max_spend is not None else None,
             "remaining": _format_decimal(remaining) if remaining is not None else None,

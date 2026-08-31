@@ -1,79 +1,60 @@
-# Facilitator
+# `xrpl-mpp-facilitator`
 
-`xrpl-mpp-facilitator` is the settlement service behind the middleware.
-
-## Use It When
-
-Use this package when you are operating the seller-side service that validates
-presigned XRPL transactions, enforces replay rules, and manages prepaid `session`
-balances.
-
-The facilitator stays non-custodial: it verifies and settles buyer-signed
-transactions but does not hold the buyer's private key or run an internal ledger.
-
-## Install
+Install and run:
 
 ```bash
 pip install xrpl-mpp-facilitator
-```
-
-## Run Locally
-
-Set the core runtime variables first:
-
-- `MY_DESTINATION_ADDRESS`
-- `FACILITATOR_BEARER_TOKEN` when `GATEWAY_AUTH_MODE=single_token`
-- `REDIS_URL`
-- `MPP_CHALLENGE_SECRET`
-
-Then start the service:
-
-```bash
+xrpl-mpp-facilitator --help
 xrpl-mpp-facilitator --reload
 ```
 
-For local docs and testing, the application loads `.env` automatically when present.
+ASGI entry point: `xrpl_mpp_facilitator.main:app`
+
+App factory: `xrpl_mpp_facilitator.factory:create_app`
 
 ## Endpoints
 
-It exposes:
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Process and configured-network health |
+| `GET /supported` | Supported XRPL intents and currencies |
+| `POST /charge` | Verify/settle a one-time charge credential |
+| `POST /session` | Verify/settle a PaymentChannel action |
 
-- `GET /health`
-- `GET /supported`
-- `POST /charge`
-- `POST /session`
+Payment POST endpoints require seller gateway bearer authentication, are body
+limited, and are rate limited. Public buyers should never call them directly.
 
-`GET /supported` advertises the XRPL payment method and asset support the
-middleware should expect. `POST /charge` handles exact-pay-per-request settlement.
-`POST /session` handles `open`, `use`, `top_up`, and `close` session actions.
+## Charge verification
 
-## Important Settings
+The service accepts pull-mode transaction blobs and push-mode transaction
+hashes. It verifies the decoded ledger transaction against the challenge and
+rejects wrong network, source, destination, currency, amount, invoice, tags,
+memos, partial-payment flags, ledger result, freshness, and replay state.
 
-The most important facilitator knobs are:
+## Payment Channels
 
-- `SETTLEMENT_MODE=validated` or `optimistic`
-- `NETWORK_ID` and `XRPL_RPC_URL`
-- `MAX_PAYMENT_LEDGER_WINDOW` for public `redis_gateways` mode
-- `REPLAY_PROCESSED_TTL_SECONDS` for replay retention
-- `SESSION_IDLE_TIMEOUT_SECONDS` and `SESSION_STATE_TTL_SECONDS` for prepaid sessions
+The channel service validates `PaymentChannelCreate`, claim signatures,
+challenge/source/network binding, and strict cumulative advancement. Redis
+updates are atomic. Matching channels opened outside the MPP flow are imported
+from the validated ledger on their first voucher/close. A validated
+`PaymentChannelFund` increase is adopted before a later claim advances.
 
-The full environment reference is documented in [Configuration](../configuration.md).
+An injected `RecipientSigner` optionally enables recipient-side redemption of a
+final cumulative claim; `PAYCHANNEL_RECIPIENT_SEED` is the built-in local
+adapter and must derive `MY_DESTINATION_ADDRESS`. This submits and validates a
+`PaymentChannelClaim` without `tfClose`; it pays the recipient but does not
+delete the channel or refund unused XRP. Without a recipient signer, MPP
+`close` durably finalizes the session and retains the final off-ledger voucher;
+it is not reported as an on-ledger close. Configure
+`PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS` so new
+claims are refused with enough time remaining before `Expiration` or
+`CancelAfter`.
 
-## Python App Factory
+## Settlement
 
-```python
-from xrpl_mpp_facilitator import create_app
+`validated` is the only supported charge settlement mode. A pull transaction
+must validate successfully after submission; a push hash must resolve to the
+same successful validated transaction. The receipt's `settlementStatus`
+extension records the validated state.
 
-app = create_app()
-```
-
-This is useful when you want to embed the facilitator in your own ASGI process
-instead of launching the packaged CLI entry point.
-
-## Operational Notes
-
-- Redis is required for replay markers and session state.
-- `validated` mode is the safer internet-facing default because the facilitator
-  waits for XRPL validation before success.
-- `redis_gateways` mode is stricter than `single_token` because it assumes
-  third-party sellers or public relays may sit in front of the facilitator.
+See [Configuration](../configuration.md) before deployment.

@@ -2,172 +2,170 @@
 
 [![Docs](https://img.shields.io/badge/docs-live-0A7E3B)](https://lgcarrier.github.io/xrpl-mpp-stack/)
 
-Python-first XRPL infrastructure for MPP HTTP payments.
+Python 3.12 infrastructure for Machine Payments Protocol (MPP) payments on the
+XRP Ledger. Version 0.2 is a clean break from this repository's earlier
+prepaid-session protocol and follows the current MPP HTTP contracts plus the
+XRPL method used by Ripple's reference SDK.
 
-Hosted docs: <https://lgcarrier.github.io/xrpl-mpp-stack/>
+- Hosted documentation: <https://lgcarrier.github.io/xrpl-mpp-stack/>
+- Normative MPP drafts: <https://github.com/tempoxyz/mpp-specs>
+- Ripple XRPL reference SDK: <https://github.com/ripple/xrpl-mpp-sdk>
 
-Upstream MPP protocol specs: <https://github.com/tempoxyz/mpp-specs>
+## Standards boundary
 
-This repo migrates the original XRPL x402 stack onto the MPP HTTP model:
+The stack deliberately separates protocol requirements from implementation
+choices:
 
-- `xrpl-mpp-core`: shared MPP models, header codecs, challenge helpers, and XRPL asset utilities
-- `xrpl-mpp-facilitator`: FastAPI facilitator for XRPL `charge` and `session`
-- `xrpl-mpp-middleware`: ASGI middleware that emits `WWW-Authenticate: Payment` and verifies `Authorization: Payment`
-- `xrpl-mpp-client`: HTTPX transport and signer for XRPL-backed MPP retries
-- `xrpl-mpp-payer`: CLI, proxy, and MCP payer runtime
+- **MPP HTTP core:** `402` challenges in `WWW-Authenticate`, credentials in
+  `Authorization: Payment` or the challenge-selected `Payment-Authorization`
+  field, optional `Accept-Payment` preferences, and `Payment-Receipt` on a
+  successful paid response.
+- **XRPL profile:** one-time `charge` payments accept a signed transaction blob
+  (pull mode) or a submitted transaction hash (push mode). Networks are named
+  `mainnet`, `testnet`, or `devnet`; currencies use `XRP` or the XRPL JSON
+  descriptor form.
+- **XRPL Payment Channels:** `session` uses signed cumulative claims with
+  `open`, `voucher`, and `close` actions. A voucher must advance the stored
+  high-water mark. `close` is a final voucher, not an on-ledger refund or
+  channel deletion. `PaymentChannelFund` remains an out-of-band XRPL operation.
+  There are no reusable session tokens, `use` actions, or application-level
+  top-ups in 0.2.
+- **Discovery draft-01:** OpenAPI discovery advertises `charge` and `session`
+  offers. Runtime `402` challenges remain authoritative.
+- **MCP transport:** `xrpl-mpp-mcp` carries challenges, credentials, receipts,
+  capabilities, and exact payment errors in MCP/JSON-RPC `_meta`. This is
+  independent of the payer package's optional MCP server.
+- **Subscription:** the upstream generic subscription intent exists, but there
+  is no XRPL subscription method profile in this stack. XRPL subscription
+  settlement is therefore unsupported.
+- **Hooks and relay:** lifecycle hooks and the sanitized outcome relay are
+  optional application architecture, not MPP wire-protocol requirements.
 
-## Package chooser
+## Packages
 
-Pick the package for the role you are building. Most integrators start with
-`xrpl-mpp-middleware` on the seller side or `xrpl-mpp-client` on the buyer side,
-then add `xrpl-mpp-facilitator` as the settlement service.
+| Package | Role |
+| --- | --- |
+| [`xrpl-mpp-core`](docs/packages/core.md) | MPP HTTP models/codecs, RFC 8785 canonicalization, XRPL charge and PayChannel contracts |
+| [`xrpl-mpp-facilitator`](docs/packages/facilitator.md) | Authenticated FastAPI verifier/settler with Redis replay and channel state |
+| [`xrpl-mpp-middleware`](docs/packages/middleware.md) | Seller-side ASGI challenges, facilitator verification, discovery helpers, hooks, and relay |
+| [`xrpl-mpp-client`](docs/packages/client.md) | Buyer-side signing and one-retry `httpx` transport for charge and PayChannel flows |
+| [`xrpl-mpp-payer`](docs/packages/payer.md) | Operator CLI, proxy, receipt store, spend policy, and optional agent server |
+| [`xrpl-mpp-mcp`](packages/mcp/README.md) | Framework-neutral native MPP transport for paid MCP operations |
 
-| Package | PyPI | Install | Use when |
-| --- | --- | --- | --- |
-| [Core](docs/packages/core.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-core?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-core/) | `pip install xrpl-mpp-core` | You need the shared MPP models, codecs, and XRPL asset helpers directly. |
-| [Facilitator](docs/packages/facilitator.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-facilitator?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-facilitator/) | `pip install xrpl-mpp-facilitator` | You are running the FastAPI settlement service behind protected seller routes. |
-| [Middleware](docs/packages/middleware.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-middleware?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-middleware/) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes that should return `402` until paid. |
-| [Client](docs/packages/client.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-client?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-client/) | `pip install xrpl-mpp-client` | You are building a buyer that signs XRPL payments and retries MPP challenges automatically. |
-| [Payer](docs/packages/payer.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-payer?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-payer/) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, or MCP support for agents. |
-
-For the smallest application-level references, start with
-`examples/seller_minimal.py` and `examples/buyer_minimal.py`. The fuller local
-demo stack remains `examples/merchant_fastapi/app.py`, `examples/buyer_httpx.py`,
-and `docker compose`.
-
-## Supported intents
-
-- `charge`: one request, one XRPL payment
-- `session`: prepaid XRPL session with `open`, `use`, `top_up`, and `close`
-
-## Payment flow at a glance
+## HTTP exchange
 
 ```mermaid
 sequenceDiagram
     participant Buyer
-    participant Middleware
+    participant Seller
     participant Facilitator
-    participant App as Seller App
+    participant XRPL
 
-    Buyer->>Middleware: Request protected route
-    Middleware-->>Buyer: 402 + WWW-Authenticate: Payment
-
-    alt charge
-        Buyer->>Buyer: Sign XRPL payment with invoiceId
-        Buyer->>Middleware: Retry with Authorization: Payment
-        Middleware->>Facilitator: POST /charge
-        Facilitator-->>Middleware: PaymentReceipt
-        Middleware->>App: Forward paid request
-        App-->>Buyer: 200 + Payment-Receipt
-    else session
-        Buyer->>Buyer: Sign XRPL prepay with sessionId
-        Buyer->>Middleware: Authorization: Payment (open)
-        Middleware->>Facilitator: POST /session
-        Facilitator-->>Middleware: Session receipt + sessionToken
-        Middleware->>App: Forward paid request
-        App-->>Buyer: 200 + Payment-Receipt
-        Note over Buyer,Facilitator: Later requests reuse sessionToken with use, top_up, and close actions
-    end
+    Buyer->>Seller: Request + Accept-Payment
+    Seller-->>Buyer: 402 + WWW-Authenticate: Payment ...
+    Buyer->>Buyer: Validate terms and sign
+    Buyer->>Seller: Retry + Payment credential
+    Seller->>Facilitator: Verify charge or session credential
+    Facilitator->>XRPL: Submit or verify when required
+    Facilitator-->>Seller: Successful receipt
+    Seller-->>Buyer: 2xx + Payment-Receipt
 ```
 
-## HTTP wire contract
+The buyer sends at most one automatic paid retry. A credential is bound to the
+original challenge, request digest when present, XRPL network, recipient,
+currency, amount, and payer source. A receipt is emitted only when the paid
+application response succeeds.
 
-- `402` responses return one or more `WWW-Authenticate: Payment ...` headers
-- paid retries use `Authorization: Payment <base64url-jcs-credential>`
-- successful paid responses include `Payment-Receipt: <base64url-jcs-receipt>`
-- auth-scheme matching for `WWW-Authenticate` and `Authorization` is case-insensitive; docs use canonical `Payment`
-- `402` responses use `Cache-Control: no-store`
-- successful paid responses use `Cache-Control: private`
-
-Seller-side `PaymentMiddlewareASGI` now rejects protected-route request bodies larger than `32768` bytes by default. Override that ceiling with `PaymentMiddlewareASGI(..., max_request_body_bytes=...)` when needed.
-
-## Minimal app examples
-
-Run the smallest seller example:
+## Development setup
 
 ```bash
-uvicorn examples.seller_minimal:app --reload --port 8010
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+pytest
 ```
 
-Run the matching buyer example:
-
-```bash
-XRPL_WALLET_SEED=replace-with-testnet-seed \
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/ \
-TARGET_BASE_URL=http://127.0.0.1:8010 \
-python -m examples.buyer_minimal
-```
-
-## Local demo
+The editable development install includes all six packages. The Compose
+development profile starts Redis, the facilitator, and the merchant example:
 
 ```bash
 cp .env.example .env
-docker compose up --build facilitator merchant
-python -m examples.buyer_httpx
+docker compose up --build redis facilitator merchant
 ```
 
-`.env.example` is a template. Before you run the demo, fill in `MY_DESTINATION_ADDRESS`, `FACILITATOR_BEARER_TOKEN`, `MPP_CHALLENGE_SECRET`, and `XRPL_WALLET_SEED`, then switch `NETWORK_ID`, `XRPL_NETWORK`, and `XRPL_RPC_URL` to XRPL Testnet values such as `xrpl:1` and `https://s.altnet.rippletest.net:51234`.
-
-`docker compose` passes that same `.env` file into the facilitator and merchant containers, and `python -m examples.buyer_httpx` now auto-loads `.env` from the repo root for local runs.
-
-The merchant example protects `GET /premium` with MPP `charge`. The buyer example signs the XRPL payment, retries automatically, and prints the unlocked response.
-
-## CLI
+With Testnet wallet values filled in, run the trace buyer separately:
 
 ```bash
-xrpl-mpp pay https://merchant.example/premium --amount 0.001 --asset XRP --dry-run
-xrpl-mpp proxy https://merchant.example --port 8787
-xrpl-mpp mcp
+docker compose --profile demo run --rm buyer
 ```
 
-## Development Setup
+Compose explicitly opts the merchant into unencrypted HTTP for its private
+development-only hop to `facilitator:8000`. The standalone seller examples
+permit unencrypted facilitator traffic only to a literal localhost or loopback
+address. Use TLS for every remote or production facilitator origin.
 
-Install the whole monorepo for local development:
+Use XRPL Testnet credentials and endpoints for development. The live integration
+test is intentionally opt-in:
 
 ```bash
-python3.12 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+RUN_XRPL_TESTNET_LIVE=1 pytest -m live tests/integration/test_live_testnet.py -s
 ```
 
-`requirements-dev.txt` installs all five packages in editable mode:
+## Security defaults
 
-- `-e ./packages/core`
-- `-e ./packages/facilitator`
-- `-e ./packages/middleware`
-- `-e ./packages/client`
-- `-e ./packages/payer`
+- HTTPS is required for buyer, facilitator, and relay traffic by default;
+  plaintext development paths require their explicit local-only opt-ins.
+- The facilitator authenticates seller gateways; gateway bearer tokens are not
+  MPP payer credentials.
+- Challenges are HMAC-bound and can be verified against rotation keys.
+- Redis provides atomic replay reservations, single-use PayChannel challenge
+  claims, and PayChannel high-water updates. Charge replay markers outlive the
+  authenticated challenge and in-flight validation window even when configured
+  TTL floors are shorter.
+- Charge access is granted only after a successful validated XRPL result;
+  accepted submission alone is never treated as settlement.
+- Ambiguous submissions return a non-cacheable `503 settlement-unknown` with a
+  stable reconciliation reference. Buyers must reconcile that reference and
+  retry the same credential; they must not create a fresh payment automatically.
+- Pull-mode blobs are decoded and checked before submission; push-mode hashes
+  must resolve to a matching validated transaction.
+- Exact destination, amount, currency, invoice, tag, memo, source, and network
+  checks are applied where present. Partial payments are rejected.
+- Never put wallet seeds, transaction blobs, payer credentials, or bearer
+  tokens in hooks or relay metadata.
+- Payer automation requires an operator-approved recipient through policy,
+  `--recipient`, or `XRPL_MPP_EXPECTED_RECIPIENT`.
 
-If you only want one package, install it directly from its package folder:
+For Payment Channels, `PAYCHANNEL_PAYER_PUBLIC_KEY` allowlists the funder claim
+key. An injected `RecipientSigner` supports KMS/HSM-backed recipient signing;
+`PAYCHANNEL_RECIPIENT_SEED` is the local-wallet adapter. Either lets the
+facilitator submit the latest cumulative claim and wait for validation. That
+claim does not set `tfClose`, refund the unused deposit, or delete the channel;
+the funder must perform the XRPL close (or rely on `CancelAfter`). Without a
+recipient signer, an MPP `close` durably finalizes the session and retains its
+final voucher for separate redemption. An opt-in Redis-leased worker can redeem
+outstanding claims and finalize idle sessions without attempting the funder's
+`tfClose`.
+Existing or externally funded channels can be imported from the
+validated ledger on their first voucher/close, and a later
+`PaymentChannelFund` increase is observed during ledger verification.
 
-```bash
-python -m pip install -e ./packages/core
-python -m pip install -e ./packages/facilitator
-python -m pip install -e ./packages/middleware
-python -m pip install -e ./packages/client
-python -m pip install -e ./packages/payer
-```
+## Migrating from 0.1
 
-The package directory names are `core`, `facilitator`, `middleware`, `client`,
-and `payer`, while the published package names are `xrpl-mpp-core`,
-`xrpl-mpp-facilitator`, `xrpl-mpp-middleware`, `xrpl-mpp-client`, and
-`xrpl-mpp-payer`.
+Version 0.2 is intentionally not wire-compatible with 0.1:
 
-## Verification
+- replace `xrpl:0` / `xrpl:1` with `mainnet` / `testnet`;
+- replace `XRP:native` and `CODE:issuer` with `XRP` or the canonical XRPL JSON
+  currency descriptor;
+- use `Payment-Authorization` when the challenge's `header` parameter selects
+  it, preserving any existing bearer `Authorization` field;
+- replace the former reusable session credential flow with PaymentChannel
+  `open` / `voucher` / `close` cumulative proofs;
+- treat the receipt's required core as `status`, `method`, `timestamp`, and
+  `reference`; XRPL details are method extensions;
+- regenerate persisted challenges and credentials instead of replaying 0.1
+  wire objects.
 
-Focused migration coverage currently lives in the MPP-native test set:
-
-```bash
-python3.12 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-python -m pytest -q \
-  tests/test_mpp_http.py \
-  tests/test_stack_package_exports.py \
-  tests/test_xrpl_mpp_package.py \
-  tests/test_xrpl_mpp_client.py \
-  tests/test_xrpl_mpp_middleware.py \
-  tests/test_xrpl_mpp_payer.py \
-  tests/test_xrpl_mpp_local_integration.py \
-  tests/test_examples.py
-```
+See the [header contract](docs/how-it-works/header-contract.md), [payment
+flows](docs/how-it-works/payment-flow.md), and [configuration
+reference](docs/configuration.md) before deploying the upgrade.

@@ -1,40 +1,69 @@
+from __future__ import annotations
+
+import pytest
+
+from xrpl_mpp_core import IssuedCurrency, serialize_currency
 from xrpl_mpp_middleware import (
+    HookDispatcher,
     PaymentMiddlewareASGI,
+    PaymentOffer,
+    PaymentOutcomeRelay,
     RouteConfig,
-    XRPLAmount,
-    XRPLAsset,
     XRPLFacilitatorClient,
+    augment_openapi,
     require_payment,
     require_session,
 )
 from xrpl_mpp_middleware.exceptions import RouteConfigurationError
-import pytest
 
 
-def test_package_exports_public_api() -> None:
+RECIPIENT = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
+ISSUER = "rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY"
+
+
+def test_package_exports_public_v02_api() -> None:
     assert PaymentMiddlewareASGI is not None
     assert RouteConfig is not None
-    assert XRPLAmount is not None
-    assert XRPLAsset is not None
     assert XRPLFacilitatorClient is not None
+    assert HookDispatcher is not None
+    assert PaymentOutcomeRelay is not None
+    assert PaymentOffer is not None
+    assert augment_openapi is not None
     assert require_payment is not None
     assert require_session is not None
 
 
-def test_require_payment_builds_charge_route_config() -> None:
+def test_require_payment_builds_named_network_xrp_terms() -> None:
     route_config = require_payment(
         facilitator_url="https://facilitator.example",
         bearer_token="secret-token",
-        pay_to="rDESTINATION123456789",
-        network="xrpl:1",
+        pay_to=RECIPIENT,
+        network="testnet",
         xrp_drops=1000,
         description="One paid request",
     )
 
-    assert route_config.facilitator_url == "https://facilitator.example"
-    assert route_config.charge_options[0].asset_identifier == "XRP:native"
-    assert route_config.charge_options[0].amount == "1000"
+    option = route_config.charge_options[0]
+    assert option.network == "testnet"
+    assert option.currency == "XRP"
+    assert option.amount == "1000"
     assert route_config.description == "One paid request"
+
+
+def test_require_payment_builds_json_issued_currency() -> None:
+    route_config = require_payment(
+        facilitator_url="https://facilitator.example",
+        bearer_token="secret-token",
+        pay_to=RECIPIENT,
+        network="mainnet",
+        amount="1.25",
+        asset_code="RLUSD",
+        asset_issuer=ISSUER,
+    )
+
+    assert route_config.charge_options[0].currency == serialize_currency(
+        IssuedCurrency(currency="524C555344000000000000000000000000000000", issuer=ISSUER)
+    )
 
 
 def test_require_payment_rejects_missing_issued_asset_issuer() -> None:
@@ -42,92 +71,53 @@ def test_require_payment_rejects_missing_issued_asset_issuer() -> None:
         require_payment(
             facilitator_url="https://facilitator.example",
             bearer_token="secret-token",
-            pay_to="rDESTINATION123456789",
-            network="xrpl:1",
+            pay_to=RECIPIENT,
+            network="testnet",
             amount="1.25",
             asset_code="RLUSD",
         )
 
 
-def test_route_config_normalizes_issued_asset_identifiers() -> None:
-    route_config = RouteConfig(
-        facilitatorUrl="https://facilitator.example",
-        bearerToken="secret-token",
-        chargeOptions=[
-            {
-                "network": "xrpl:1",
-                "recipient": "rDESTINATION123456789",
-                "assetIdentifier": "rlusd:rIssuer",
-                "amount": "1.25",
-            }
-        ],
-        sessionOptions=[
-            {
-                "network": "xrpl:1",
-                "recipient": "rDESTINATION123456789",
-                "assetIdentifier": "usdc:rIssuer",
-                "amount": "2.5",
-                "minPrepayAmount": "10",
-            }
-        ],
-    )
-
-    assert route_config.charge_options[0].asset_identifier == "RLUSD:rIssuer"
-    assert route_config.session_options[0].asset_identifier == "USDC:rIssuer"
-
-
-def test_require_session_builds_session_route_config() -> None:
+def test_require_session_builds_xrp_paychannel_terms() -> None:
     route_config = require_session(
         facilitator_url="https://facilitator.example",
         bearer_token="secret-token",
-        pay_to="rDESTINATION123456789",
-        network="xrpl:1",
+        pay_to=RECIPIENT,
+        network="testnet",
         xrp_drops=250,
-        min_prepay_amount="1000",
-        idle_timeout_seconds=600,
-        description="Metered session route",
+        channel_id="A" * 64,
+        description="Metered PayChannel route",
     )
 
-    assert route_config.session_options[0].asset_identifier == "XRP:native"
-    assert route_config.session_options[0].amount == "250"
-    assert route_config.session_options[0].min_prepay_amount == "1000"
-    assert route_config.session_options[0].unit_amount == "250"
-    assert route_config.session_options[0].idle_timeout_seconds == 600
+    option = route_config.session_options[0]
+    assert option.network == "testnet"
+    assert option.currency == "XRP"
+    assert option.amount == "250"
+    assert option.channel_id == "A" * 64
 
 
-def test_require_session_normalizes_issued_asset_identifier() -> None:
-    route_config = require_session(
-        facilitator_url="https://facilitator.example",
-        bearer_token="secret-token",
-        pay_to="rDESTINATION123456789",
-        network="xrpl:1",
-        amount="1.25",
-        min_prepay_amount="5",
-        asset_code="rlusd",
-        asset_issuer="rIssuer",
-    )
-
-    assert route_config.session_options[0].asset_identifier == "RLUSD:rIssuer"
-
-
-def test_require_session_rejects_divergent_unit_amount() -> None:
-    with pytest.raises(ValueError, match="unitAmount must match amount"):
-        require_session(
-            facilitator_url="https://facilitator.example",
-            bearer_token="secret-token",
-            pay_to="rDESTINATION123456789",
-            network="xrpl:1",
-            xrp_drops=250,
-            min_prepay_amount="1000",
-            unit_amount="500",
+def test_route_config_rejects_legacy_asset_identifier_shape() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        RouteConfig(
+            facilitatorUrl="https://facilitator.example",
+            bearerToken="secret-token",
+            chargeOptions=[
+                {
+                    "network": "testnet",
+                    "recipient": RECIPIENT,
+                    "assetIdentifier": "XRP:native",
+                    "amount": "1000",
+                }
+            ],
         )
 
 
-def test_facilitator_settings_allow_blank_allowed_issued_assets_placeholder() -> None:
+def test_facilitator_settings_allow_blank_issued_asset_placeholder() -> None:
     from xrpl_mpp_facilitator.config import Settings
 
     settings = Settings(
-        MY_DESTINATION_ADDRESS="rDESTINATION123456789",
+        _env_file=None,
+        MY_DESTINATION_ADDRESS=RECIPIENT,
         FACILITATOR_BEARER_TOKEN="secret-token",
         REDIS_URL="redis://localhost:6379/0",
         MPP_CHALLENGE_SECRET="challenge-secret",

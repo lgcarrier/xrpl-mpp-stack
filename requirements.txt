@@ -3,3 +3,4 @@
 ./packages/middleware
 ./packages/client
 ./packages/payer
+./packages/mcp

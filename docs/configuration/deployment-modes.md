@@ -1,177 +1,109 @@
-# Deployment Modes
+# Deployment modes
 
-This page gives concrete environment examples for the most useful deployment
-modes in this repo.
+## Local Testnet development
 
-For the full variable reference, continue to [Configuration](../configuration.md).
-
-## Mode Selector
-
-| Mode | Best for | Auth mode | Network |
-| --- | --- | --- | --- |
-| Local Docker demo | First run, docs validation, Testnet walkthroughs | `single_token` | XRPL Testnet |
-| Self-hosted seller + facilitator | One app team operating both sides | `single_token` | Testnet or Mainnet |
-| Shared or public facilitator | Multi-seller or gateway-managed traffic | `redis_gateways` | Usually Testnet or Mainnet |
-| Buyer workstation or agent | CLI, proxy, MCP, or automated buyers | n/a | Depends on target |
-
-## Local Docker Demo
-
-This is the simplest end-to-end mode and the one used by the quickstart:
+Run Redis, the facilitator, the seller example, and a buyer on one workstation.
+Use `testnet`, a Testnet JSON-RPC endpoint, and disposable Testnet wallets.
+The Compose trace keeps plaintext buyer traffic on its private development
+network. `XRPLPaymentTransport` itself permits plaintext only for loopback with
+the explicit `allow_insecure_localhost=True` opt-in.
 
 ```bash
-GATEWAY_AUTH_MODE=single_token
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-NETWORK_ID=xrpl:1
-XRPL_NETWORK=xrpl:1
-SETTLEMENT_MODE=validated
-MY_DESTINATION_ADDRESS=r...
-FACILITATOR_BEARER_TOKEN=replace-with-a-random-secret
-REDIS_URL=redis://127.0.0.1:6379/0
-XRPL_WALLET_SEED=sEd...
-MPP_CHALLENGE_SECRET=replace-with-a-long-random-secret
-PRICE_DROPS=1000
-PAYMENT_ASSET=XRP:native
+docker compose up --build redis facilitator merchant
+python -m examples.buyer_httpx
 ```
 
-Generate this automatically with:
+Authorize the buyer with `XRPL_MPP_EXPECTED_RECIPIENT` and a user-asset-unit
+`XRPL_MPP_MAX_SPEND`; the example converts XRP to wire-level drops before
+constructing its transport policy.
 
-```bash
-python -m devtools.quickstart
-```
+The Compose merchant command explicitly constructs its facilitator client with
+`allow_insecure_http=True` for the private `http://facilitator:8000` network
+hop. The normal merchant app has no environment switch for this and permits
+plaintext only for a literal localhost or loopback facilitator. Use an HTTPS
+origin outside this exact development profile.
 
-Run it with:
+## Single seller
 
-```bash
-docker compose --env-file .env.quickstart up --build
-docker compose --env-file .env.quickstart --profile demo run --rm buyer
-```
+Use `GATEWAY_AUTH_MODE=single_token` when one trusted seller deployment calls
+one facilitator. Store a strong `FACILITATOR_BEARER_TOKEN` in both services,
+restrict facilitator ingress, use TLS, and keep API docs disabled.
 
-## Self-Hosted Seller + Facilitator
+The bearer token authenticates the seller to the facilitator. It is not an MPP
+payment credential and must never be forwarded to buyers.
 
-Use this when your seller app talks to one facilitator you operate yourself.
+## Multiple seller gateways
 
-### Facilitator env
+Use Redis-backed gateway authentication when one facilitator serves multiple
+sellers. Provision distinct gateway tokens so rate limiting, revocation, and
+audit identity are independent. Do not share one public token across tenants.
 
-```bash
-GATEWAY_AUTH_MODE=single_token
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-MY_DESTINATION_ADDRESS=rYourSettlementAddress
-FACILITATOR_BEARER_TOKEN=replace-with-a-random-secret
-REDIS_URL=redis://redis.internal:6379/0
-NETWORK_ID=xrpl:1
-SETTLEMENT_MODE=validated
-MPP_CHALLENGE_SECRET=replace-with-a-long-random-secret
-MPP_DEFAULT_REALM=merchant.example
-```
+## Validated settlement
 
-### Seller app env
+`validated` is the only supported charge settlement mode. Pull mode submits the
+signed blob and waits for a validated `tesSUCCESS`; submission acceptance alone
+does not authorize access. Push mode resolves the supplied hash and requires a
+matching successful validated transaction. Configure a validation timeout that
+fits the deployment. A pending or timeout response means the outcome is unknown,
+not unpaid: never initiate a fresh payment. Reconcile the returned
+`paymentReference` against validated ledger state, then retry the same credential
+only after that status check if the original transaction did not settle.
 
-```bash
-FACILITATOR_URL=https://facilitator.example
-FACILITATOR_TOKEN=replace-with-a-random-secret
-MERCHANT_XRPL_ADDRESS=rYourSettlementAddress
-XRPL_NETWORK=xrpl:1
-MPP_CHALLENGE_SECRET=replace-with-a-long-random-secret
-MPP_DEFAULT_REALM=merchant.example
-PRICE_DROPS=1000
-```
+Push-mode transaction hashes still require resolution to a matching payment;
+do not treat an arbitrary submitted hash as authorization.
 
-This is the best default for one merchant app plus one facilitator service.
+## PaymentChannel deployment
 
-## Shared Or Public Facilitator
+PaymentChannel state requires atomic shared storage. All facilitator replicas
+must use the same Redis data set and the same challenge-verification keys. A
+replica-local cache cannot safely enforce the cumulative high-water rule.
 
-Use `redis_gateways` when you need per-gateway auth records instead of one shared token.
+Set `PAYCHANNEL_PAYER_PUBLIC_KEY` to the allowed funder claim key. The
+facilitator verifies the validated ledger channel on every accepted claim path,
+including funding, parties, key, settle delay, and closing window.
+`PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS` reserves time to redeem before
+`Expiration` or `CancelAfter`; it is a rejection boundary, not a warning.
 
-### Facilitator env
+An operator may configure `PAYCHANNEL_RECIPIENT_SEED` to let the facilitator
+redeem the retained cumulative claim and await validation. This recipient-side
+`PaymentChannelClaim` pays the recipient but does not close/delete the channel
+or refund unused XRP. The funder controls `tfClose`; `CancelAfter` is the other
+on-ledger release path. Without a recipient signer, MPP `close` durably
+finalizes the session and retains its final voucher for a separate redemption
+workflow.
 
-```bash
-GATEWAY_AUTH_MODE=redis_gateways
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-MY_DESTINATION_ADDRESS=rYourSettlementAddress
-REDIS_URL=redis://redis.internal:6379/0
-NETWORK_ID=xrpl:1
-SETTLEMENT_MODE=validated
-MPP_CHALLENGE_SECRET=replace-with-a-long-random-secret
-MAX_PAYMENT_LEDGER_WINDOW=20
-```
+Prefer an injected KMS/HSM-backed `RecipientSigner` when the facilitator is
+constructed as a library; the environment seed is only the built-in local
+adapter. Background redemption is opt-in through
+`PAYCHANNEL_REDEEM_INTERVAL_SECONDS`. It is bounded by the configured batch and
+fee caps and coordinated across replicas with a Redis lease. Optional idle
+finalization closes only the MPP session state after redeeming; recipient
+redemption always submits `PaymentChannelClaim` with `Flags=0`, never `tfClose`.
 
-In this mode the facilitator looks up gateway tokens in Redis at:
+Open or fund a channel outside MPP when desired. `PaymentChannelFund` is an XRPL
+operation, not an MPP `session` action. A matching externally opened channel is
+imported from validated ledger state on its first voucher/close, and validated
+funding increases are adopted before a subsequent cumulative claim advances.
+If an MPP channel open returns settlement pending, reconcile its transaction-hash
+`paymentReference` and retry the same signed `PaymentChannelCreate` credential;
+never create a fresh channel transaction while the original outcome is unknown.
 
-```text
-facilitator:gateway_token:<sha256(token)>
-```
+## Native MCP
 
-Each token record must contain:
+Embed `xrpl-mpp-mcp` in the MCP server that owns the paid operation. It supports
+`tools/call`, `resources/read`, and `prompts/get`, capability advertisement,
+root or MCP-nested `_meta`, operation binding, replay-safe processing, and
+payment-specific JSON-RPC errors.
 
-- `status=active`
-- `gateway_id=<non-empty-id>`
+Do not create a second HTTP challenge exchange around MCP. The MCP transport is
+the protocol boundary for those operations.
 
-Example bootstrap:
+## Hooks and outcome relay
 
-```bash
-export TOKEN="replace-with-a-random-secret"
-TOKEN_HASH=$(python - <<'PY'
-import hashlib
-import os
-print(hashlib.sha256(os.environ["TOKEN"].encode()).hexdigest())
-PY
-)
-redis-cli HSET "facilitator:gateway_token:${TOKEN_HASH}" status active gateway_id seller-a
-```
+Hooks run inside application architecture and should receive identifiers and
+outcomes only. Configure timeouts and failure policy explicitly.
 
-This mode also requires bounded XRPL ledger freshness, so buyers must include a
-valid `LastLedgerSequence`.
-
-## Buyer Workstation Or Agent Runtime
-
-This is the minimal env for `xrpl-mpp pay`, `xrpl-mpp proxy`, or `xrpl-mpp mcp`:
-
-```bash
-XRPL_WALLET_SEED=sEd...
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234
-XRPL_NETWORK=xrpl:1
-PAYMENT_ASSET=XRP:native
-XRPL_MPP_MAX_SPEND=0.01
-```
-
-Useful commands:
-
-```bash
-xrpl-mpp pay https://merchant.example/premium --dry-run
-xrpl-mpp proxy https://merchant.example --port 8787
-xrpl-mpp mcp
-```
-
-## Demo Asset Variants
-
-The demo mode supports three main assets:
-
-### XRP
-
-```bash
-PRICE_DROPS=1000
-PRICE_ASSET_CODE=XRP
-PRICE_ASSET_ISSUER=
-PRICE_ASSET_AMOUNT=
-PAYMENT_ASSET=XRP:native
-```
-
-### RLUSD
-
-```bash
-PRICE_ASSET_CODE=RLUSD
-PRICE_ASSET_ISSUER=rIssuer
-PRICE_ASSET_AMOUNT=1.25
-PAYMENT_ASSET=RLUSD:rIssuer
-```
-
-### USDC
-
-```bash
-PRICE_ASSET_CODE=USDC
-PRICE_ASSET_ISSUER=rIssuer
-PRICE_ASSET_AMOUNT=2.50
-PAYMENT_ASSET=USDC:rIssuer
-```
-
-For the exact helper commands, continue to [Run Demo Variants](../quickstart/demo-variants.md).
+The outcome relay accepts only a validated, allowlisted receipt projection. It
+requires HTTPS except for an explicit loopback development override, adds an
+idempotency key, and rejects secret-bearing keys. It is not a settlement
+service, webhook standard, or required MPP component.

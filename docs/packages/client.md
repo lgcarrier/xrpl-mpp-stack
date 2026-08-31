@@ -1,71 +1,59 @@
-# Client
+# `xrpl-mpp-client`
 
-`xrpl-mpp-client` is the buyer-side Python SDK for MPP HTTP.
-
-## Use It When
-
-Use this package when you are building an application buyer or test harness that
-should detect `402` responses, sign XRPL payments, and retry the request automatically.
-
-## Install
+Install:
 
 ```bash
 pip install xrpl-mpp-client
 ```
 
-## Main APIs
+The client package signs XRPL payment evidence and integrates it with `httpx`.
 
-Main entrypoints:
+## Signer
 
-- `XRPLPaymentSigner`
-- `XRPLPaymentTransport`
-- `wrap_httpx_with_mpp_payment(...)`
-- `select_payment_challenge(...)`
+`XRPLPaymentSigner` supports:
 
-It supports both `charge` and `session` HTTP intents for the repo-local `xrpl` payment method.
+- charge pull credentials containing a signed Payment blob;
+- charge push credentials containing a transaction hash;
+- PaymentChannel open credentials;
+- signed cumulative voucher credentials;
+- close credentials;
+- XRPL DID sources, deterministic InvoiceID binding, tags, and memos;
+- recipient, amount, currency, and network policy before signing;
+- HTTPS-only RPC by default, a final autofilled fee ceiling, and bounded IOU
+  source/path policy.
 
-## Minimal Example
+An issued-currency payment without `XRPLIOUPathfindingPolicy` is direct-only
+and sets `SendMax` equal to the exact destination `Amount`. To pay transfer
+fees or use a cross-currency route, configure an explicit source currency,
+absolute `max_source_amount`, and `slippage_bps` from 0 through 1000. The
+signer never enables partial payment. It does not enumerate wallet holdings or
+support MPT pathfinding.
 
-```python
-import asyncio
+## Transport
 
-from xrpl.wallet import Wallet
-from xrpl_mpp_client import XRPLPaymentSigner, wrap_httpx_with_mpp_payment
+`XRPLPaymentTransport` sends `Accept-Payment`, parses multiple challenges,
+selects a supported offer, preserves ordinary bearer auth, and retries once with
+the selected credential header. HTTPS is required by default; plaintext
+loopback development needs the explicit `allow_insecure_localhost=True` opt-in.
+For successful charges, the receipt reference must equal the signed
+transaction hash (or supplied push hash) before the response is accepted.
 
+For Payment Channels, `register_open_transaction(...)` supplies a signed
+`PaymentChannelCreate` blob and `register_channel(...)` resumes a known channel
+with its cumulative high-water amount. `close_session(...)` requests an
+explicit final proof; it does not submit the funder's XRPL `tfClose`
+transaction, delete the channel, or refund unused XRP.
 
-async def main() -> None:
-    signer = XRPLPaymentSigner(
-        Wallet.from_seed("sEd..."),
-        rpc_url="https://s.altnet.rippletest.net:51234/",
-        network="xrpl:1",
-    )
-    async with wrap_httpx_with_mpp_payment(
-        signer,
-        asset="XRP:native",
-    ) as client:
-        response = await client.get("https://merchant.example/premium")
-        print(response.status_code)
-        print(response.text)
+Open credentials derive the deterministic channel ID from the signed create
+transaction, bind its payer, recipient, claim key, and funding, and sign that
+real ID. A nonzero initial cumulative claim is allowed only up to the channel
+funding amount.
 
+The transport stores only client-side URL/channel coordination. It does not
+receive or replay a server-issued session credential.
 
-asyncio.run(main())
-```
+## Safety
 
-## Session Handling
-
-`XRPLPaymentTransport` tracks active MPP sessions per request target. On a
-session-protected route it will:
-
-1. open the session with a signed XRPL payment
-2. reuse the returned `sessionToken` on later retries
-3. top up automatically when the facilitator asks for more prepaid balance
-4. allow explicit teardown with `await transport.close_session(...)`
-
-That makes it a good default transport for async HTTPX buyers that want to treat
-MPP payment as a transport concern instead of hand-assembling credentials.
-
-## Notes
-
-- The signer copies the challenge `invoiceId` or `sessionId` into the XRPL `InvoiceID`.
-- When `autofill_enabled=True`, the signer asks XRPL for fee and ledger bounds automatically.
-- Use `select_payment_challenge(...)` directly when a seller offers multiple assets or networks and you want custom challenge selection logic.
+Always set signer policy for production buyers. A syntactically valid challenge
+is not automatically acceptable. The buyer remains responsible for checking
+recipient, spend, currency, network, expiry, and trust context before signing.

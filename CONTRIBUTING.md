@@ -21,6 +21,7 @@ pip install -e ./packages/facilitator
 pip install -e ./packages/middleware
 pip install -e ./packages/client
 pip install -e ./packages/payer
+pip install -e ./packages/mcp
 ```
 
 Run the local test suite before opening a pull request:
@@ -60,19 +61,20 @@ manifests, while coordinated
 
 ## Package Releases
 
-This repo publishes five packages independently:
+This repo publishes six packages independently:
 
 - `xrpl-mpp-core`
 - `xrpl-mpp-facilitator`
 - `xrpl-mpp-middleware`
 - `xrpl-mpp-client`
 - `xrpl-mpp-payer`
+- `xrpl-mpp-mcp`
 
 Recommended verification before publishing:
 
 ```bash
 pytest -q
-for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do
+for package in packages/core packages/facilitator packages/middleware packages/client packages/payer packages/mcp; do
   (
     cd "$package"
     python -m build --sdist
@@ -91,13 +93,14 @@ Release flow:
 
 - Follow [docs/release.md](docs/release.md) for the full trusted-publishing setup and release playbook.
 - Run the `Publish Python Package` workflow manually for a TestPyPI rehearsal.
-- Publish `core` first, wait for index availability, then publish `facilitator`, `middleware`, `client`, and `payer`.
+- Publish `core` first, wait for index availability, then publish `facilitator`, `middleware`, `client`, and `payer`; `mcp` has no internal package dependency.
 - Push one of these tag prefixes to publish to PyPI:
   - `core-v*`
   - `facilitator-v*`
   - `middleware-v*`
   - `client-v*`
   - `payer-v*`
+  - `mcp-v*`
 
 ## Project Expectations
 

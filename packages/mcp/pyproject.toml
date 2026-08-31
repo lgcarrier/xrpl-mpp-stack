@@ -1,0 +1,47 @@
+[build-system]
+requires = ["editables>=0.5", "hatchling>=1.27,<1.32"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xrpl-mpp-mcp"
+version = "0.2.0"
+description = "Framework-neutral MPP payment transport for JSON-RPC and MCP"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Louis-Guillaume Carrier-Bedard", email = "lgcarrier@gmail.com" },
+]
+keywords = ["xrpl", "mpp", "mcp", "json-rpc", "payments"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Typing :: Typed",
+]
+dependencies = [
+  "pydantic>=2,<3",
+]
+
+[project.urls]
+Documentation = "https://lgcarrier.github.io/xrpl-mpp-stack/packages/mcp/"
+Source = "https://github.com/lgcarrier/xrpl-mpp-stack/tree/main/packages/mcp"
+Issues = "https://github.com/lgcarrier/xrpl-mpp-stack/issues"
+Changelog = "https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xrpl_mpp_mcp"]
+
+[tool.hatch.build.hooks.custom]
+path = "build_hook.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/xrpl_mpp_mcp",
+  "/README.md",
+  "/LICENSE",
+  "/build_hook.py",
+]

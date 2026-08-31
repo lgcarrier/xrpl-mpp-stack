@@ -1,104 +1,90 @@
-# Replay And Freshness
+# Replay, freshness, and binding
 
-The facilitator protects exact-pay-per-request flows in two layers:
+Payment proof is useful only when it is tied to the challenge and accepted once.
 
-- Redis replay markers keyed by both the challenge reference and signed-blob hash
-- XRPL ledger-window checks in public-gateway mode
+## Challenge binding
 
-## Replay Keys
+The stack validates:
 
-Every XRPL-backed payment attempt resolves to two replay identifiers:
+- the echoed challenge object and ID;
+- method and intent;
+- RFC 3339 expiry;
+- optional request digest;
+- HMAC-bound challenge fields and rotation key;
+- named XRPL network;
+- payer source DID and transaction account;
+- recipient, currency, exact amount, invoice, tags, and memos.
 
-- the challenge reference carried in XRPL `InvoiceID`
-- `blob_hash`
+For charges, the challenge `invoiceId` (or its deterministic challenge-derived
+value) must equal the transaction `InvoiceID`; arbitrary truncation is never a
+fallback. PayChannel sessions bind `channelId` and the prior `cumulativeAmount`
+into each new challenge.
 
-For MPP `charge`, the signed XRPL transaction must carry the challenge `invoiceId` in `InvoiceID`.
+A buyer must never sign from discovery metadata alone. Discovery can be stale;
+the runtime challenge contains the authoritative terms.
 
-For MPP `session open` and `session top_up`, the signed XRPL transaction must carry the challenge `sessionId` in `InvoiceID`.
+## Charge replay state
 
-If the signed transaction omits that reference or uses a different value, the facilitator rejects the payment before settlement.
+Before settlement, the facilitator reserves the payment reference in Redis. A
+concurrent duplicate cannot be submitted twice. On success, the marker is
+committed until at least the authenticated challenge expiry, plus the ledger
+validation window and a clock-skew margin. The configured pending and processed
+TTLs are floors, not caps, so a short operator setting cannot reopen replay while
+the credential can still settle. A charge without a usable authenticated expiry
+fails closed because no safe finite retention can be derived. On a safe,
+definitive submission failure, the reservation can be released according to
+settlement state; an ambiguous result stays reserved for reconciliation.
 
-That means two requests collide if they reuse either:
+Charge invoice and transaction/blob replay keys include the named XRPL network.
+This isolates mainnet, testnet, and devnet markers when multiple facilitator
+deployments share Redis. Upgrading from an earlier release starts a new
+network-scoped key space; keep the old unscoped keys until their configured TTLs
+expire, but do not copy them into every network because that would recreate the
+cross-network collision.
 
-- the same XRPL `InvoiceID`
-- the same signed transaction blob
+Push mode validates the referenced transaction rather than trusting a hash.
+Pull mode decodes and validates the blob before submission. In both modes the
+ledger result and freshness window are checked.
 
-## Charge And Session Settlement
+Every pull-mode charge transaction and every PayChannel open must carry
+`LastLedgerSequence`; otherwise a stolen signed blob could remain submitable
+indefinitely. The bound must still be live relative to the validated ledger. If
+the challenge expires, it must additionally not outlast that authenticated
+expiry. If `CancelAfter` is present, it must leave the configured recipient
+settlement margin before the channel can disappear.
 
-For `charge`, middleware forwards the decoded MPP credential to `POST /charge`, and the facilitator:
+## PaymentChannel high-water state
 
-1. verifies the challenge binding and expiry
-2. validates the signed XRPL payment and reserves both replay keys as `pending`
-3. submits the transaction to XRPL
-4. either converts the reservation to `processed` or releases it on failure
-5. returns a `PaymentReceipt`
+The atomic channel record binds the channel to network, payer, recipient, and
+signing key. A voucher is accepted only when its cumulative amount is greater
+than the stored high-water amount. Equal or lower amounts are replay or rollback
+attempts.
 
-For `session`, the facilitator uses `POST /session`:
+All facilitator replicas must share the same Redis state. Do not enforce this
+rule with process-local memory in a multi-replica production deployment.
 
-1. `open` and `top_up` reuse the same replay reservation and XRPL settlement path, keyed by `sessionId`
-2. `use` and `close` mutate Redis-backed session state without submitting a new XRPL transaction
+Each PayChannel challenge ID is also claimed atomically after the credential's
+party binding, claim signature, and ledger state have been verified, but before
+the channel high-water mark advances. This prevents one valid challenge from
+authorizing multiple successively higher cumulative claims without letting a
+malformed proof consume the challenge. The marker outlives `challenge.expires`
+plus a clock-skew margin; when `expires` is absent, it is retained indefinitely
+because no finite replay window is safe.
 
-This keeps replay protection and settlement atomic while matching the current MPP HTTP API surface.
+## Key rotation
 
-## Redis State
+`MPP_CHALLENGE_SECRET` signs new challenges.
+`MPP_CHALLENGE_PREVIOUS_SECRETS` verifies challenges signed before rotation.
+Keep previous keys until their maximum challenge lifetime has elapsed, then
+remove them. Never place challenge keys in buyer-visible configuration.
 
-Replay markers for `charge`, `session open`, and `session top_up` are stored in Redis as:
+## Operational logging
 
-- `pending:<reservation_id>` while a settlement is in progress
-- `processed` after a successful settlement path
+Log stable identifiers, state transitions, settlement results, and safe failure
+codes. Redact or omit:
 
-Defaults:
-
-- processed TTL: `REPLAY_PROCESSED_TTL_SECONDS`, default `604800` seconds
-- pending TTL: `max(VALIDATION_TIMEOUT + 60, 300)`
-
-If either replay key already exists, the facilitator rejects the payment with:
-
-```text
-Transaction already processed (replay attack)
-```
-
-## Settlement Mode Effects
-
-### `validated`
-
-In `validated` mode, the facilitator:
-
-1. submits the transaction
-2. polls XRPL for up to `VALIDATION_TIMEOUT` seconds
-3. waits for `tx.result.validated`
-4. checks the delivered amount against the required exact amount
-5. returns `status="validated"`
-
-If validation never arrives in time, the pending reservation is released and settlement fails.
-
-### `optimistic`
-
-In `optimistic` mode, the facilitator:
-
-1. submits the transaction
-2. marks the replay reservation processed immediately
-3. returns `status="submitted"`
-
-This mode lowers latency, but it shifts more validation responsibility to the surrounding system.
-
-## Freshness Rules In `redis_gateways` Mode
-
-When `GATEWAY_AUTH_MODE=redis_gateways`, the facilitator additionally requires bounded XRPL timing:
-
-- the signed transaction must include `LastLedgerSequence`
-- `LastLedgerSequence` must be greater than the latest validated ledger
-- `LastLedgerSequence` must not exceed `current_validated_ledger + MAX_PAYMENT_LEDGER_WINDOW`
-
-If any of those checks fail, the facilitator rejects the payment before settlement.
-
-This is why public-gateway mode is stricter than `single_token`: it assumes third-party sellers may retry or relay traffic, so the facilitator enforces a narrow ledger window for safer exact-payment handling.
-
-## Practical Guidance
-
-- generate a fresh signed transaction per paid request
-- use the challenge `invoiceId` or `sessionId` as the XRPL `InvoiceID` when you sign manually
-- leave XRPL autofill enabled, or set `LastLedgerSequence` yourself, when using `redis_gateways`
-- prefer `validated` settlement for internet-facing deployments
-
-For the on-the-wire request/response format, continue to [Header Contract](header-contract.md).
+- payment credential values;
+- signed transaction blobs and claim signatures;
+- wallet seeds and private keys;
+- seller gateway bearer tokens;
+- full receipt headers when not operationally necessary.

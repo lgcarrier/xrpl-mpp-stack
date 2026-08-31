@@ -1,174 +1,81 @@
-# Buyer Integration
+# Buyer integration
 
-This guide is for buyers that need to pay MPP-protected XRPL resources.
+Use `xrpl-mpp-client` when payment is part of Python application code. Use
+`xrpl-mpp-payer` when an operator needs a CLI, proxy, policy, receipt store, or
+agent-facing service.
 
-There are three main ways to integrate:
+## Client responsibilities
 
-- use `xrpl-mpp-client` inside an application
-- use `xrpl-mpp-payer` as an operator CLI or local proxy
-- use `xrpl-mpp-payer[mcp]` for local agent tooling
+1. Send `Accept-Payment` preferences.
+2. Parse every Payment challenge on a `402` response.
+3. Select a supported method/intent and validate all terms.
+4. Enforce local recipient, amount, currency, and network policy.
+5. Sign a charge or cumulative PaymentChannel proof.
+6. Put the credential in the exact header selected by the challenge.
+7. Retry the original request once.
+8. Decode a receipt only from a successful response and bind its reference to
+   the exact transaction or push hash that was authorized.
 
-For runnable references in this repo, use `examples/buyer_minimal.py` for the
-smallest app-level flow and `examples/buyer_httpx.py` for the fuller quickstart
-demo that auto-loads `.env`.
+## Signer policy
 
-## Application Buyer With HTTPX
+Configure `XRPLPaymentSigner` with `network`, `expected_recipient`, `max_amount`,
+and `allowed_currencies` wherever possible. Issued-currency and MPT values use
+canonical JSON strings; legacy colon-delimited asset identifiers are not 0.2
+wire values.
 
-The simplest application-level integration is `wrap_httpx_with_mpp_payment(...)`:
+For a one-time charge, choose pull mode when the facilitator should submit the
+signed blob. Choose hash mode only after the buyer has submitted the transaction
+and can present its transaction hash.
 
-```python
-import asyncio
+IOU payments are direct-only by default, with source spend capped to the exact
+destination amount. Transfer-fee headroom or cross-currency routing requires
+`XRPLIOUPathfindingPolicy` with one explicit source asset, an absolute source
+amount ceiling, and 0-1000 basis points of slippage. The RPC proposes paths but
+does not choose the asset or spending limit. Partial payments, MPT pathfinding,
+and automatic wallet-holdings enumeration are not supported.
 
-from xrpl.wallet import Wallet
-from xrpl_mpp_client import XRPLPaymentSigner, wrap_httpx_with_mpp_payment
+## HTTP transport
 
+`XRPLPaymentTransport` preserves ordinary bearer authorization when a challenge
+selects `Payment-Authorization`, requires TLS by default, and performs at most
+one automatic retry. Plaintext loopback development requires the explicit
+`allow_insecure_localhost=True` opt-in.
 
-async def main() -> None:
-    signer = XRPLPaymentSigner(
-        Wallet.from_seed("sEd..."),
-        rpc_url="https://s.altnet.rippletest.net:51234/",
-        network="xrpl:1",
-    )
+For a known PaymentChannel, register the channel ID and current cumulative
+amount for the protected URL. To create a channel through a session challenge,
+register a signed `PaymentChannelCreate` transaction. Keep this mapping in
+application state; it is not a server-issued session credential.
+The open credential derives and signs the transaction's actual channel ID and
+rejects mismatched payer, recipient, claim key, or funding. Its initial
+cumulative claim may be nonzero but cannot exceed the channel funding.
 
-    async with wrap_httpx_with_mpp_payment(
-        signer,
-        asset="XRP:native",
-        base_url="https://merchant.example",
-    ) as client:
-        response = await client.get("/premium")
-        print(response.status_code)
-        print(response.text)
+The payer may instead create/fund the channel directly on XRPL. A later
+voucher/close can trigger validated server-side import of a matching channel.
+Use `PaymentChannelFund` out of band to increase its deposit; the next claim is
+still cumulative and must not exceed the newly validated total funding.
 
+`close_session(...)` signs a final voucher. It does not itself submit the
+funder's `tfClose` transaction or guarantee return of unused XRP. Coordinate
+the separate on-ledger close/refund lifecycle after the recipient has had time
+to redeem its highest claim.
 
-asyncio.run(main())
-```
+## Native MCP
 
-That exact integration shape is runnable via `python -m examples.buyer_minimal`.
+Native paid MCP operations use `xrpl-mpp-mcp`, not HTTP headers. Credentials use
+`org.paymentauth/credential` and receipts use `org.paymentauth/receipt` in
+root-level JSON-RPC `_meta` or nested MCP `_meta` as required by the operation.
 
-That transport automatically:
+Supported paid operation names are `tools/call`, `resources/read`, and
+`prompts/get`. Bind every challenge to the canonical operation request so a
+credential for one tool/resource/prompt cannot authorize another.
 
-- detects `402 Payment Required`
-- parses `WWW-Authenticate: Payment`
-- signs a charge or session credential
-- retries with `Authorization: Payment`
-- stores session tokens and reuses them on later requests
+## Security
 
-## Session Behavior
-
-For `session` routes, the client transport can:
-
-1. open a session with a signed XRPL prepayment
-2. reuse the returned `sessionToken`
-3. top up automatically when balance is low
-4. close a session explicitly with `await transport.close_session(...)`
-
-That makes `xrpl-mpp-client` the best fit when payment should feel like HTTP
-transport behavior instead of explicit business logic in every call site.
-
-## Asset Selection
-
-Use canonical asset identifiers:
-
-- `XRP:native`
-- `RLUSD:rIssuer`
-- `USDC:rIssuer`
-
-If a seller advertises multiple payment options, use `select_payment_challenge(...)`
-to choose the right challenge by network and asset.
-
-## CLI Buyer
-
-For manual ops or shell workflows:
-
-```bash
-xrpl-mpp pay https://merchant.example/premium --amount 0.001 --asset XRP
-xrpl-mpp pay https://merchant.example/premium --dry-run
-xrpl-mpp receipts --limit 20
-xrpl-mpp budget --asset XRP
-```
-
-`--dry-run` is useful when you want to inspect the challenge flow before letting
-the buyer sign and retry automatically.
-
-## Local Proxy
-
-If you want an unmodified tool or browser to talk through an auto-paying proxy:
-
-```bash
-xrpl-mpp proxy https://merchant.example --port 8787
-```
-
-That starts a local forward proxy which:
-
-- forwards the original method, path, query, headers, and body
-- pays upstream MPP challenges when needed
-- returns the upstream response back to the caller
-
-## MCP And Agent Tooling
-
-For local agent access:
-
-```bash
-pip install "xrpl-mpp-payer[mcp]"
-xrpl-mpp skill install
-xrpl-mpp mcp
-```
-
-Claude Desktop can register it directly:
-
-```bash
-claude mcp add xrpl-mpp-payer -- xrpl-mpp mcp
-```
-
-## Environment Variables
-
-The most important buyer-side variables are:
-
-- `XRPL_WALLET_SEED`
-- `XRPL_RPC_URL`
-- `XRPL_NETWORK`
-- `PAYMENT_ASSET`
-- `XRPL_MPP_MAX_SPEND`
-- `XRPL_MPP_RECEIPTS_PATH`
-
-`xrpl-mpp-payer` defaults its network to `xrpl:1` when not configured, which is
-convenient for local Testnet demos but should be made explicit in production.
-
-## Common Flows
-
-### Demo Buyer
-
-```bash
-python -m examples.buyer_httpx
-```
-
-That script loads `.env` from the repo root when present and then pays the
-target route from `TARGET_URL`.
-
-### Minimal Buyer
-
-```bash
-XRPL_WALLET_SEED=replace-with-testnet-seed \
-XRPL_RPC_URL=https://s.altnet.rippletest.net:51234/ \
-TARGET_BASE_URL=http://127.0.0.1:8010 \
-python -m examples.buyer_minimal
-```
-
-That example keeps the integration to one `wrap_httpx_with_mpp_payment(...)`
-call with `base_url` and `client.get("/premium")`, which matches the code shown
-earlier in this guide.
-
-### Issued-Asset Demo
-
-```bash
-python -m devtools.demo_env --asset rlusd
-docker compose --env-file .env.quickstart.rlusd --profile demo run --rm buyer
-```
-
-The same shape works for USDC with `--asset usdc`.
-
-## Where To Go Next
-
-- [Run Demo Variants](../quickstart/demo-variants.md)
-- [Seller Integration](seller.md)
-- [Configuration](../configuration.md)
+- Never auto-pay a challenge outside configured spend and recipient policy.
+- For the payer CLI/proxy/MCP wrapper, set the operator-approved destination
+  with `--recipient` or `XRPL_MPP_EXPECTED_RECIPIENT`; a challenge-provided
+  recipient is not sufficient authorization.
+- Reject expired challenges before signing.
+- Do not follow an untrusted challenge to a new RPC or facilitator endpoint.
+- Protect the receipt store because receipts reveal transaction references.
+- Use disposable Testnet wallets for demos and tests.

@@ -25,6 +25,7 @@ updates:
       - "/packages/middleware"
       - "/packages/client"
       - "/packages/payer"
+      - "/packages/mcp"
     schedule:
       interval: "weekly"
       day: "monday"

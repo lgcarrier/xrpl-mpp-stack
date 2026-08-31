@@ -1,14 +1,15 @@
 [build-system]
-requires = ["editables>=0.5", "hatchling>=1.27"]
+requires = ["editables>=0.5", "hatchling>=1.27,<1.32"]
 build-backend = "hatchling.build"
 
 [project]
 name = "xrpl-mpp-client"
-version = "0.1.4"
+version = "0.2.0"
 description = "Buyer-side Python SDK for XRPL MPP HTTP payments"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "Louis-Guillaume Carrier-Bedard", email = "lgcarrier@gmail.com" },
 ]
@@ -25,8 +26,8 @@ classifiers = [
 dependencies = [
   "httpx==0.28.1",
   "pydantic>=2,<3",
-  "xrpl-py==4.5.0",
-  "xrpl-mpp-core>=0.1.4,<0.2.0",
+  "xrpl-py>=5.0,<6",
+  "xrpl-mpp-core>=0.2.0,<0.3.0",
 ]
 
 [project.urls]
@@ -40,9 +41,6 @@ packages = ["src/xrpl_mpp_client"]
 
 [tool.hatch.build.hooks.custom]
 path = "build_hook.py"
-
-[tool.hatch.build.targets.wheel.force-include]
-"LICENSE" = "LICENSE"
 
 [tool.hatch.build.targets.sdist]
 include = [

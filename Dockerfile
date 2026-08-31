@@ -10,7 +10,7 @@ COPY LICENSE ./LICENSE
 COPY devtools ./devtools
 COPY packages ./packages
 COPY examples ./examples
-RUN pip install --no-cache-dir /app/packages/core /app/packages/facilitator /app/packages/middleware /app/packages/client /app/packages/payer
+RUN pip install --no-cache-dir /app/packages/core /app/packages/facilitator /app/packages/middleware /app/packages/client '/app/packages/payer[mcp]' /app/packages/mcp
 
 USER app
 EXPOSE 8000

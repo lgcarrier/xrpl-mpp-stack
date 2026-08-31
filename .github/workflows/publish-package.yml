@@ -13,6 +13,7 @@ on:
           - middleware
           - client
           - payer
+          - mcp
   push:
     tags:
       - "core-v*"
@@ -20,12 +21,48 @@ on:
       - "middleware-v*"
       - "client-v*"
       - "payer-v*"
+      - "mcp-v*"
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
+  release-verification:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install verification dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt -r docs/requirements.txt
+
+      - name: Compile source files
+        run: PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools conformance
+
+      - name: Run the full local test suite
+        run: PYTHONPYCACHEPREFIX=/tmp/pycache pytest -q
+
+      - name: Build hosted documentation
+        run: mkdocs build --strict
+
+      - name: Build and smoke the release container
+        run: |
+          docker build -t xrpl-mpp-facilitator:release-gate .
+          docker run --rm xrpl-mpp-facilitator:release-gate \
+            python -c "import os, fastmcp, xrpl_mpp_payer.mcp as payer_mcp; assert os.getuid() != 0; assert payer_mcp.mcp is not None"
+
+  conformance:
+    uses: ./.github/workflows/conformance.yml
+
   resolve:
     runs-on: ubuntu-latest
     outputs:
@@ -36,8 +73,8 @@ jobs:
       publish_environment: ${{ steps.resolve.outputs.publish_environment }}
       package_version: ${{ steps.metadata.outputs.package_version }}
       core_requirement: ${{ steps.metadata.outputs.core_requirement }}
+      client_requirement: ${{ steps.metadata.outputs.client_requirement }}
       index_url: ${{ steps.indexes.outputs.index_url }}
-      extra_index_url: ${{ steps.indexes.outputs.extra_index_url }}
 
     steps:
       - name: Check out repository
@@ -86,6 +123,11 @@ jobs:
               echo "package_name=xrpl-mpp-payer" >> "$GITHUB_OUTPUT"
               echo "artifact_name=payer-distributions" >> "$GITHUB_OUTPUT"
               ;;
+            mcp)
+              echo "package_dir=packages/mcp" >> "$GITHUB_OUTPUT"
+              echo "package_name=xrpl-mpp-mcp" >> "$GITHUB_OUTPUT"
+              echo "artifact_name=mcp-distributions" >> "$GITHUB_OUTPUT"
+              ;;
             *)
               echo "Unsupported package target: $target" >&2
               exit 1
@@ -113,14 +155,17 @@ jobs:
           project = pyproject["project"]
           version = project["version"]
           core_requirement = ""
+          client_requirement = ""
           for dependency in project.get("dependencies", []):
               if dependency.startswith("xrpl-mpp-core"):
                   core_requirement = dependency
-                  break
+              elif dependency.startswith("xrpl-mpp-client"):
+                  client_requirement = dependency
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"package_version={version}\n")
               handle.write(f"core_requirement={core_requirement}\n")
+              handle.write(f"client_requirement={client_requirement}\n")
           PY
 
       - name: Resolve publish indexes
@@ -128,10 +173,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "index_url=https://test.pypi.org/simple/" >> "$GITHUB_OUTPUT"
-            echo "extra_index_url=https://pypi.org/simple/" >> "$GITHUB_OUTPUT"
           else
             echo "index_url=https://pypi.org/simple/" >> "$GITHUB_OUTPUT"
-            echo "extra_index_url=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate tag version matches package version
@@ -144,7 +187,7 @@ jobs:
           fi
 
   build:
-    needs: resolve
+    needs: [resolve, release-verification, conformance]
     runs-on: ubuntu-latest
 
     steps:
@@ -163,22 +206,36 @@ jobs:
           pip install build twine
 
       - name: Verify core dependency is available on target index
-        if: needs.resolve.outputs.package_name != 'xrpl-mpp-core'
+        if: needs.resolve.outputs.core_requirement != ''
         env:
-          CORE_REQUIREMENT: ${{ needs.resolve.outputs.core_requirement }}
+          PACKAGE_VERSION: ${{ needs.resolve.outputs.package_version }}
           INDEX_URL: ${{ needs.resolve.outputs.index_url }}
-          EXTRA_INDEX_URL: ${{ needs.resolve.outputs.extra_index_url }}
         run: |
           for attempt in 1 2 3 4 5 6; do
             args=(download --no-deps --dest /tmp/core-index-check --index-url "$INDEX_URL")
-            if [ -n "$EXTRA_INDEX_URL" ]; then
-              args+=(--extra-index-url "$EXTRA_INDEX_URL")
-            fi
-            if python -m pip "${args[@]}" "$CORE_REQUIREMENT"; then
+            if python -m pip "${args[@]}" "xrpl-mpp-core==$PACKAGE_VERSION"; then
               exit 0
             fi
             if [ "$attempt" -eq 6 ]; then
               echo "Unable to resolve required core dependency from the release index" >&2
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Verify client dependency is available on target index
+        if: needs.resolve.outputs.client_requirement != ''
+        env:
+          PACKAGE_VERSION: ${{ needs.resolve.outputs.package_version }}
+          INDEX_URL: ${{ needs.resolve.outputs.index_url }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            args=(download --no-deps --dest /tmp/client-index-check --index-url "$INDEX_URL")
+            if python -m pip "${args[@]}" "xrpl-mpp-client==$PACKAGE_VERSION"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "Unable to resolve required client dependency from the release index" >&2
               exit 1
             fi
             sleep 15
@@ -203,6 +260,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     environment:
       name: ${{ needs.resolve.outputs.publish_environment }}
       url: https://test.pypi.org/project/${{ needs.resolve.outputs.package_name }}/
@@ -235,8 +294,10 @@ jobs:
           TARGET: ${{ needs.resolve.outputs.target }}
           PACKAGE_NAME: ${{ needs.resolve.outputs.package_name }}
           PACKAGE_VERSION: ${{ needs.resolve.outputs.package_version }}
+          CORE_REQUIREMENT: ${{ needs.resolve.outputs.core_requirement }}
+          CLIENT_REQUIREMENT: ${{ needs.resolve.outputs.client_requirement }}
           INDEX_URL: ${{ needs.resolve.outputs.index_url }}
-          EXTRA_INDEX_URL: ${{ needs.resolve.outputs.extra_index_url }}
+          DEPENDENCY_INDEX_URL: https://pypi.org/simple/
         run: |
           verify_install() {
             requirement="$1"
@@ -247,13 +308,45 @@ jobs:
               python -m venv "$venv_path"
               . "$venv_path/bin/activate"
               python -m pip install --upgrade pip
+              artifact_dir="/tmp/testpypi-artifacts-$attempt"
+              mkdir -p "$artifact_dir"
 
-              args=(install --index-url "$INDEX_URL")
-              if [ -n "$EXTRA_INDEX_URL" ]; then
-                args+=(--extra-index-url "$EXTRA_INDEX_URL")
+              download_args=(
+                download --no-deps --only-binary=:all:
+                --dest "$artifact_dir" --index-url "$INDEX_URL"
+              )
+              downloaded=true
+              python -m pip "${download_args[@]}" \
+                "${PACKAGE_NAME}==${PACKAGE_VERSION}" || downloaded=false
+              if [ -n "$CORE_REQUIREMENT" ]; then
+                python -m pip "${download_args[@]}" \
+                  "xrpl-mpp-core==${PACKAGE_VERSION}" || downloaded=false
+              fi
+              if [ -n "$CLIENT_REQUIREMENT" ]; then
+                python -m pip "${download_args[@]}" \
+                  "xrpl-mpp-client==${PACKAGE_VERSION}" || downloaded=false
               fi
 
-              if python -m pip "${args[@]}" "$requirement"; then
+              artifacts=("$artifact_dir"/*.whl)
+              installed=false
+              if [ "$downloaded" = true ] && [ -f "${artifacts[0]}" ]; then
+                if python -m pip install \
+                  --index-url "$DEPENDENCY_INDEX_URL" "${artifacts[@]}"; then
+                  installed=true
+                fi
+              fi
+              if [ "$installed" = true ] && [[ "$requirement" == *"[mcp]"* ]]; then
+                target_candidates=(
+                  "$artifact_dir/${PACKAGE_NAME//-/_}-${PACKAGE_VERSION}-"*.whl
+                )
+                if [ ! -f "${target_candidates[0]}" ] || ! python -m pip install \
+                  --index-url "$DEPENDENCY_INDEX_URL" \
+                  "${PACKAGE_NAME}[mcp] @ file://${target_candidates[0]}"; then
+                  installed=false
+                fi
+              fi
+
+              if [ "$installed" = true ]; then
                 case "$TARGET" in
                   core)
                     python -c "import xrpl_mpp_core as package; assert package.XRP_CODE == 'XRP'"
@@ -275,6 +368,9 @@ jobs:
                       python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
                       xrpl-mpp --help >/dev/null
                     fi
+                    ;;
+                  mcp)
+                    python -c "from xrpl_mpp_mcp import CallbackPaymentProcessor; assert CallbackPaymentProcessor"
                     ;;
                 esac
                 deactivate
@@ -303,6 +399,8 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     environment:
       name: ${{ needs.resolve.outputs.publish_environment }}
       url: https://pypi.org/project/${{ needs.resolve.outputs.package_name }}/
@@ -367,6 +465,9 @@ jobs:
                       python -c "from xrpl_mpp_payer import XRPLPayer; assert XRPLPayer"
                       xrpl-mpp --help >/dev/null
                     fi
+                    ;;
+                  mcp)
+                    python -c "from xrpl_mpp_mcp import CallbackPaymentProcessor; assert CallbackPaymentProcessor"
                     ;;
                 esac
                 deactivate
