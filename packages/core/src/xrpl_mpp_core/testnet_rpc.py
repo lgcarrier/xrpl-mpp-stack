@@ -6,12 +6,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 PUBLIC_TESTNET_RPC_URLS: tuple[str, ...] = (
-    "https://testnet.xrpl-labs.com/",
     "https://s.altnet.rippletest.net:51234/",
+    "https://testnet.xrpl-labs.com/",
 )
 TESTNET_NETWORK_ID = 1
 DEFAULT_RPC_TIMEOUT_SECONDS = 5.0
-DEFAULT_USER_AGENT = "xrpl-mpp-stack/0.1"
+DEFAULT_USER_AGENT = "xrpl-mpp-stack/0.2"
 
 
 class TestnetRPCResolutionError(RuntimeError):

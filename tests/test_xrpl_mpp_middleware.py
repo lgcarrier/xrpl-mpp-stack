@@ -1,48 +1,55 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable
+from collections.abc import Callable
+import json
 
 import httpx
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from xrpl.core import binarycodec
+from xrpl.models.transactions import Payment
 from xrpl.wallet import Wallet
 
 from xrpl_mpp_client import XRPLPaymentSigner, build_payment_authorization
 from xrpl_mpp_core import (
+    PAYMENT_AUTHORIZATION_HEADER,
     FacilitatorSupportedMethod,
     FacilitatorSupportedResponse,
-    PaymentCredential,
     PaymentReceipt,
-    XRPLAsset,
     XRPLChargeMethodDetails,
     XRPLChargeRequest,
-    decode_challenge_request,
+    XRPLSessionMethodDetails,
+    XRPLSessionRequest,
     build_payment_challenge,
+    decode_charge_payload,
+    decode_challenge_request,
     decode_payment_receipt,
     extract_payment_challenges,
 )
+from xrpl_mpp_middleware.client import XRPLFacilitatorClient
 from xrpl_mpp_middleware.exceptions import (
     FacilitatorPaymentError,
     FacilitatorProtocolError,
     RouteConfigurationError,
 )
 from xrpl_mpp_middleware.middleware import (
+    PAYCHANNEL_CUMULATIVE_HEADER,
+    PAYCHANNEL_ID_HEADER,
     PAYMENT_RECEIPT_HEADER,
     PaymentMiddlewareASGI,
     require_payment,
     require_session,
 )
-from xrpl_mpp_middleware.client import XRPLFacilitatorClient
-from xrpl_mpp_middleware.types import RouteConfig, SessionRouteSpec
+from xrpl_mpp_middleware.types import ChargeRouteSpec, RouteConfig
 
 FACILITATOR_URL = "https://facilitator.example"
 FACILITATOR_TOKEN = "secret-token"
-CHALLENGE_SECRET = "middleware-test-secret"
+CHALLENGE_SECRET = "middleware-test-secret-minimum-32-bytes"
 DESTINATION = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
-PAYER = "rPAYER123456789"
+PAYER = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
 
 
 class FakeFacilitatorClient:
@@ -53,621 +60,520 @@ class FakeFacilitatorClient:
         charge_receipt: PaymentReceipt | None = None,
         session_receipt: PaymentReceipt | None = None,
         charge_error: Exception | None = None,
-        session_error: Exception | None = None,
     ) -> None:
         self.supported = supported
         self.charge_receipt = charge_receipt
         self.session_receipt = session_receipt
         self.charge_error = charge_error
-        self.session_error = session_error
         self.startup_calls = 0
-        self.get_supported_calls = 0
         self.charge_calls = []
         self.session_calls = []
 
     async def startup(self) -> None:
         self.startup_calls += 1
-        return None
 
     async def aclose(self) -> None:
         return None
 
-    async def get_supported(self, *, force_refresh: bool = False) -> FacilitatorSupportedResponse:
-        self.get_supported_calls += 1
+    async def get_supported(self, *, force_refresh: bool = False):
         return self.supported
 
     async def charge(self, credential):
         self.charge_calls.append(credential)
         if self.charge_error is not None:
             raise self.charge_error
-        if self.charge_receipt is None:
-            raise AssertionError("charge_receipt must be configured")
+        assert self.charge_receipt is not None
         return self.charge_receipt
 
     async def session(self, credential):
         self.session_calls.append(credential)
-        if self.session_error is not None:
-            raise self.session_error
-        if self.session_receipt is None:
-            raise AssertionError("session_receipt must be configured")
+        assert self.session_receipt is not None
         return self.session_receipt
 
 
-def build_supported(*, intents: list[str] | None = None) -> FacilitatorSupportedResponse:
+def _supported(*, currencies: list[str] | None = None, intents: list[str] | None = None):
     return FacilitatorSupportedResponse(
         methods=[
             FacilitatorSupportedMethod(
                 method="xrpl",
                 intents=intents or ["charge", "session"],
-                network="xrpl:1",
-                assets=[XRPLAsset(code="XRP")],
+                network="testnet",
+                currencies=currencies or ["XRP"],
                 settlementMode="validated",
             )
         ]
     )
 
 
-def build_charge_receipt() -> PaymentReceipt:
+def _charge_receipt() -> PaymentReceipt:
     return PaymentReceipt(
+        status="success",
         method="xrpl",
-        timestamp="2026-03-21T12:00:00Z",
-        reference="ABC123HASH",
-        challengeId="challenge-id",
-        intent="charge",
-        network="xrpl:1",
+        timestamp="2026-08-30T12:00:00Z",
+        reference="A" * 64,
+        network="testnet",
         payer=PAYER,
         recipient=DESTINATION,
-        invoiceId="A" * 64,
-        txHash="ABC123HASH",
+        txHash="A" * 64,
         settlementStatus="validated",
-        asset={"code": "XRP"},
-        amount={"value": "1000", "unit": "drops", "asset": {"code": "XRP"}, "drops": 1000},
     )
 
 
-def build_charge_credential() -> PaymentCredential:
-    challenge = build_payment_challenge(
-        secret=CHALLENGE_SECRET,
-        realm="merchant.example",
-        method="xrpl",
-        intent="charge",
-        request_model=XRPLChargeRequest(
-            amount="1000",
-            currency="XRP:native",
-            recipient=DESTINATION,
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
-        ),
-        expires_in_seconds=300,
-    )
-    return PaymentCredential(challenge=challenge, payload={"signedTxBlob": "DEADBEEF"})
-
-
-def build_session_receipt() -> PaymentReceipt:
+def _session_receipt(*, action: str = "voucher") -> PaymentReceipt:
     return PaymentReceipt(
+        status="success",
         method="xrpl",
-        timestamp="2026-03-21T12:00:00Z",
-        reference="session-123",
-        challengeId="challenge-id",
-        intent="session",
-        network="xrpl:1",
+        timestamp="2026-08-30T12:00:00Z",
+        reference=f"{'C' * 64}:125",
+        network="testnet",
         payer=PAYER,
         recipient=DESTINATION,
-        sessionId="session-123",
-        sessionToken="session-token",
-        settlementStatus="session_open",
-        asset={"code": "XRP"},
-        amount={"value": "1000", "unit": "drops", "asset": {"code": "XRP"}, "drops": 1000},
-        availableBalance="750",
-        prepaidTotal="1000",
-        spentTotal="250",
-        lastAction="open",
+        channelId="C" * 64,
+        cumulative="125",
+        action=action,
     )
 
 
-def make_client_factory(client: FakeFacilitatorClient) -> Callable[[str, str], FakeFacilitatorClient]:
-    def _factory(url: str, token: str) -> FakeFacilitatorClient:
-        assert url == FACILITATOR_URL
-        assert token == FACILITATOR_TOKEN
+def _factory(client: FakeFacilitatorClient) -> Callable[[str, str], FakeFacilitatorClient]:
+    def build(url: str, token: str) -> FakeFacilitatorClient:
+        assert (url, token) == (FACILITATOR_URL, FACILITATOR_TOKEN)
         return client
 
-    return _factory
+    return build
 
 
-def build_app(client_factory, route_config=None) -> FastAPI:
+def _charge_route(*, alternate: bool = False) -> RouteConfig:
+    route = require_payment(
+        facilitator_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        pay_to=DESTINATION,
+        network="testnet",
+        xrp_drops=1000,
+        description="Paid route",
+    )
+    if alternate:
+        route = route.model_copy(update={"credential_header": PAYMENT_AUTHORIZATION_HEADER})
+    return route
+
+
+def _app(
+    facilitator: FakeFacilitatorClient,
+    *,
+    route: RouteConfig | None = None,
+    failure: str | None = None,
+) -> FastAPI:
     app = FastAPI()
 
     @app.get("/paid")
-    async def paid(request: Request) -> dict[str, object]:
-        payment = request.state.mpp_payment
-        return {
-            "intent": payment.intent,
-            "payer": payment.payer,
-            "reference": payment.reference,
-        }
+    async def paid(request: Request):
+        receipt = request.state.mpp_payment
+        if failure == "response":
+            return JSONResponse(status_code=500, content={"detail": "merchant failure"})
+        if failure == "exception":
+            raise RuntimeError("boom")
+        return {"payer": receipt.payer, "reference": receipt.reference}
 
     app.add_middleware(
         PaymentMiddlewareASGI,
-        route_configs={
-            "GET /paid": route_config
-            or require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Paid route",
-            )
-        },
-        client_factory=client_factory,
-        challenge_secret=CHALLENGE_SECRET,
+        route_configs={"GET /paid": route or _charge_route()},
+        client_factory=_factory(facilitator),
+        challenge_secrets=[CHALLENGE_SECRET, "previous-secret"],
     )
     return app
 
 
-def build_post_app(client_factory, *, max_request_body_bytes: int = 32_768) -> FastAPI:
+def test_unpaid_request_returns_native_bound_charge_challenge() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+
+    with TestClient(_app(facilitator)) as client:
+        response = client.get("/paid")
+
+    challenge = extract_payment_challenges(response.headers)[0]
+    request = decode_challenge_request(challenge)
+    assert response.status_code == 402
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert (challenge.method, challenge.intent) == ("xrpl", "charge")
+    assert (request.currency, request.method_details.network) == ("XRP", "testnet")
+
+
+def test_valid_charge_injects_state_and_only_adds_receipt_to_2xx() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+
+    with TestClient(_app(facilitator)) as client:
+        challenge = extract_payment_challenges(client.get("/paid").headers)[0]
+        response = client.get(
+            "/paid",
+            headers={
+                "Authorization": build_payment_authorization(
+                    signer.build_charge_credential(challenge)
+                )
+            },
+        )
+
+    receipt = decode_payment_receipt(response.headers[PAYMENT_RECEIPT_HEADER])
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private"
+    assert receipt.reference == "A" * 64
+    assert response.json() == {"payer": PAYER, "reference": "A" * 64}
+    assert len(facilitator.charge_calls) == 1
+
+
+def test_challenge_binding_includes_raw_query_string() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+
+    with TestClient(_app(facilitator)) as client:
+        challenge = extract_payment_challenges(client.get("/paid?tier=basic").headers)[0]
+        response = client.get(
+            "/paid?tier=premium",
+            headers={
+                "Authorization": build_payment_authorization(
+                    signer.build_charge_credential(challenge)
+                )
+            },
+        )
+
+    assert response.status_code == 402
+    assert response.json()["type"].endswith("/invalid-challenge")
+    assert not facilitator.charge_calls
+
+
+def test_verified_payment_header_is_removed_before_application_dispatch() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    app = FastAPI()
+
+    @app.get("/paid")
+    async def paid(request: Request):
+        return {
+            "authorization": request.headers.get("authorization"),
+            "paymentAuthorization": request.headers.get(PAYMENT_AUTHORIZATION_HEADER),
+        }
+
+    app.add_middleware(
+        PaymentMiddlewareASGI,
+        route_configs={"GET /paid": _charge_route(alternate=True)},
+        client_factory=_factory(facilitator),
+        challenge_secrets=[CHALLENGE_SECRET],
+    )
+
+    with TestClient(app) as client:
+        initial = client.get("/paid", headers={"Authorization": "Bearer identity"})
+        challenge = extract_payment_challenges(initial.headers)[0]
+        response = client.get(
+            "/paid",
+            headers={
+                "Authorization": "Bearer identity",
+                PAYMENT_AUTHORIZATION_HEADER: build_payment_authorization(
+                    signer.build_charge_credential(challenge)
+                ),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "authorization": "Bearer identity",
+        "paymentAuthorization": None,
+    }
+
+
+def test_alternate_header_preserves_bearer_and_rejects_wrong_field() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+
+    with TestClient(_app(facilitator, route=_charge_route(alternate=True))) as client:
+        initial = client.get("/paid", headers={"Authorization": "Bearer identity"})
+        challenge = extract_payment_challenges(initial.headers)[0]
+        credential = build_payment_authorization(signer.build_charge_credential(challenge))
+        wrong = client.get("/paid", headers={"Authorization": credential})
+        paid = client.get(
+            "/paid",
+            headers={
+                "Authorization": "Bearer identity",
+                PAYMENT_AUTHORIZATION_HEADER: credential,
+            },
+        )
+
+    assert challenge.header == PAYMENT_AUTHORIZATION_HEADER
+    assert wrong.status_code == 402
+    assert wrong.json()["type"].endswith("/invalid-challenge")
+    assert paid.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "duplicate_headers",
+    [
+        [("Authorization", "Bearer first"), ("Authorization", "Bearer second")],
+        [
+            (PAYMENT_AUTHORIZATION_HEADER, "Payment first"),
+            (PAYMENT_AUTHORIZATION_HEADER, "Payment second"),
+        ],
+    ],
+)
+def test_duplicate_authorization_field_lines_are_rejected_before_facilitator_startup(
+    duplicate_headers: list[tuple[str, str]],
+) -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+
+    with TestClient(_app(facilitator, route=_charge_route(alternate=True))) as client:
+        response = client.get("/paid", headers=duplicate_headers)
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Duplicate authorization header fields are not allowed"
+    }
+    assert facilitator.startup_calls == 0
+    assert not facilitator.charge_calls
+
+
+def test_malformed_credential_returns_typed_problem_and_fresh_challenge() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+
+    with TestClient(_app(facilitator, route=_charge_route(alternate=True))) as client:
+        response = client.get(
+            "/paid",
+            headers={PAYMENT_AUTHORIZATION_HEADER: "Payment not-base64!"},
+        )
+
+    assert response.status_code == 402
+    assert response.json()["type"].endswith("/malformed-credential")
+    assert extract_payment_challenges(response.headers)
+    assert not facilitator.charge_calls
+
+
+def test_accept_payment_ranks_multi_offer_route() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+        session_receipt=_session_receipt(),
+    )
+    route = RouteConfig(
+        facilitatorUrl=FACILITATOR_URL,
+        bearerToken=FACILITATOR_TOKEN,
+        chargeOptions=[
+            ChargeRouteSpec(
+                network="testnet",
+                recipient=DESTINATION,
+                currency="XRP",
+                amount="1000",
+            )
+        ],
+        sessionOptions=[
+            {
+                "network": "testnet",
+                "recipient": DESTINATION,
+                "amount": "25",
+                "channelId": "C" * 64,
+            }
+        ],
+    )
+
+    with TestClient(_app(facilitator, route=route)) as client:
+        response = client.get(
+            "/paid",
+            headers={"Accept-Payment": "xrpl/session, xrpl/charge;q=0.2"},
+        )
+
+    challenges = extract_payment_challenges(response.headers)
+    assert [item.intent for item in challenges] == ["session", "charge"]
+
+
+def test_paychannel_headers_bind_session_challenge_and_voucher() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        session_receipt=_session_receipt(),
+    )
+    route = require_session(
+        facilitator_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        pay_to=DESTINATION,
+        network="testnet",
+        xrp_drops=25,
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    channel_headers = {
+        PAYCHANNEL_ID_HEADER: "C" * 64,
+        PAYCHANNEL_CUMULATIVE_HEADER: "100",
+    }
+
+    with TestClient(_app(facilitator, route=route)) as client:
+        initial = client.get("/paid", headers=channel_headers)
+        challenge = extract_payment_challenges(initial.headers)[0]
+        request = decode_challenge_request(challenge)
+        credential = signer.build_session_voucher_credential(challenge)
+        paid = client.get(
+            "/paid",
+            headers={
+                **channel_headers,
+                "Authorization": build_payment_authorization(credential),
+            },
+        )
+
+    assert request.channel_id == "C" * 64
+    assert request.method_details.cumulative_amount == "100"
+    assert paid.status_code == 200
+    assert decode_payment_receipt(paid.headers[PAYMENT_RECEIPT_HEADER]).cumulative == "125"
+    assert len(facilitator.session_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(PAYCHANNEL_ID_HEADER, "not-a-channel"), (PAYCHANNEL_CUMULATIVE_HEADER, "100")],
+        [(PAYCHANNEL_ID_HEADER, "C" * 64), (PAYCHANNEL_CUMULATIVE_HEADER, "-1")],
+        [(PAYCHANNEL_ID_HEADER, "C" * 64)],
+        [
+            (PAYCHANNEL_ID_HEADER, "C" * 64),
+            (PAYCHANNEL_ID_HEADER, "D" * 64),
+            (PAYCHANNEL_CUMULATIVE_HEADER, "100"),
+        ],
+    ],
+)
+def test_malformed_paychannel_hints_return_controlled_client_error(headers) -> None:
+    facilitator = FakeFacilitatorClient(supported=_supported())
+    route = require_session(
+        facilitator_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        pay_to=DESTINATION,
+        network="testnet",
+        xrp_drops=25,
+    )
+
+    with TestClient(_app(facilitator, route=route)) as client:
+        response = client.get("/paid", headers=headers)
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid PayChannel session hint headers"}
+    assert "WWW-Authenticate" not in response.headers
+    assert facilitator.startup_calls == 0
+
+
+@pytest.mark.parametrize("failure", ["response", "exception"])
+def test_paid_application_failure_never_gets_a_receipt(failure: str) -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+
+    with TestClient(
+        _app(facilitator, route=_charge_route(alternate=True), failure=failure),
+        raise_server_exceptions=False,
+    ) as client:
+        challenge = extract_payment_challenges(client.get("/paid").headers)[0]
+        response = client.get(
+            "/paid",
+            headers={
+                "Authorization": "Bearer identity",
+                PAYMENT_AUTHORIZATION_HEADER: build_payment_authorization(
+                    signer.build_charge_credential(challenge)
+                ),
+            },
+        )
+
+    assert response.status_code == 500
+    assert PAYMENT_RECEIPT_HEADER not in response.headers
+    if failure == "exception":
+        assert response.json()["paymentReference"] == "A" * 64
+
+
+def test_facilitator_payment_error_returns_fresh_challenge() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_error=FacilitatorPaymentError("charge", 402, "invalid payment"),
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+
+    with TestClient(_app(facilitator)) as client:
+        challenge = extract_payment_challenges(client.get("/paid").headers)[0]
+        response = client.get(
+            "/paid",
+            headers={
+                "Authorization": build_payment_authorization(
+                    signer.build_charge_credential(challenge)
+                )
+            },
+        )
+
+    assert response.status_code == 402
+    assert extract_payment_challenges(response.headers)
+
+
+def test_route_startup_rejects_unadvertised_currency() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(currencies=["XRP"]),
+        charge_receipt=_charge_receipt(),
+    )
+    route = require_payment(
+        facilitator_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        pay_to=DESTINATION,
+        network="testnet",
+        amount="1.25",
+        asset_code="USD",
+        asset_issuer=DESTINATION,
+    )
+    middleware = PaymentMiddlewareASGI(
+        FastAPI(),
+        route_configs={"GET /paid": route},
+        client_factory=_factory(facilitator),
+        challenge_secrets=[CHALLENGE_SECRET],
+    )
+
+    with pytest.raises(RouteConfigurationError, match="unsupported currency"):
+        asyncio.run(middleware.startup())
+
+
+def test_protected_route_rejects_oversized_body_before_facilitator_startup() -> None:
+    facilitator = FakeFacilitatorClient(
+        supported=_supported(),
+        charge_receipt=_charge_receipt(),
+    )
     app = FastAPI()
 
     @app.post("/paid")
-    async def paid(request: Request) -> dict[str, object]:
-        payment = request.state.mpp_payment
-        return {
-            "intent": payment.intent,
-            "payer": payment.payer,
-            "reference": payment.reference,
-        }
+    async def paid():
+        return {"ok": True}
 
     app.add_middleware(
         PaymentMiddlewareASGI,
-        route_configs={
-            "POST /paid": require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Paid route",
-            )
-        },
-        client_factory=client_factory,
-        challenge_secret=CHALLENGE_SECRET,
-        max_request_body_bytes=max_request_body_bytes,
-    )
-    return app
-
-
-def test_unpaid_request_returns_www_authenticate_payment_challenge() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = build_app(make_client_factory(client))
-
-    with TestClient(app) as test_client:
-        response = test_client.get("/paid")
-
-    assert response.status_code == 402
-    assert response.headers["Cache-Control"] == "no-store"
-    challenges = extract_payment_challenges(response.headers)
-    assert len(challenges) == 1
-    assert challenges[0].method == "xrpl"
-    assert challenges[0].intent == "charge"
-    assert response.json()["status"] == 402
-
-
-def test_invalid_authorization_returns_fresh_challenge() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = build_app(make_client_factory(client))
-
-    with TestClient(app) as test_client:
-        response = test_client.get("/paid", headers={"Authorization": "Bearer nope"})
-
-    assert response.status_code == 402
-    assert extract_payment_challenges(response.headers)
-    assert client.charge_calls == []
-
-
-def test_unprotected_routes_do_not_trigger_paid_route_startup() -> None:
-    class FailingStartupClient(FakeFacilitatorClient):
-        async def startup(self) -> None:
-            self.startup_calls += 1
-            raise RuntimeError("facilitator unavailable")
-
-    client = FailingStartupClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = build_app(make_client_factory(client))
-
-    @app.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
-
-    with TestClient(app) as test_client:
-        response = test_client.get("/health")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-    assert client.startup_calls == 0
-    assert client.get_supported_calls == 0
-
-
-def test_valid_charge_authorization_injects_state_and_receipt_header() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = build_app(make_client_factory(client))
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_charge_credential(challenge))},
-        )
-
-    assert response.status_code == 200
-    assert response.headers["Cache-Control"] == "private"
-    receipt = decode_payment_receipt(response.headers[PAYMENT_RECEIPT_HEADER])
-    assert receipt.intent == "charge"
-    assert response.json() == {
-        "intent": "charge",
-        "payer": PAYER,
-        "reference": "ABC123HASH",
-    }
-    assert len(client.charge_calls) == 1
-
-
-def test_protected_routes_reject_oversized_body_from_content_length() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = build_post_app(
-        make_client_factory(client),
+        route_configs={"POST /paid": _charge_route()},
+        client_factory=_factory(facilitator),
+        challenge_secrets=[CHALLENGE_SECRET],
         max_request_body_bytes=5,
     )
 
-    with TestClient(app) as test_client:
-        response = test_client.post("/paid", content=b"123456")
+    with TestClient(app) as client:
+        response = client.post("/paid", content=b"123456")
 
     assert response.status_code == 413
-    assert response.json() == {"detail": "Request body too large"}
-    assert client.startup_calls == 0
-    assert client.get_supported_calls == 0
-    assert client.charge_calls == []
+    assert facilitator.startup_calls == 0
 
 
-def test_protected_routes_reject_oversized_streamed_body() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app_called = False
-
-    async def protected_app(scope, receive, send) -> None:
-        nonlocal app_called
-        app_called = True
-        response = JSONResponse(status_code=200, content={"ok": True})
-        await response(scope, receive, send)
-
-    middleware = PaymentMiddlewareASGI(
-        protected_app,
-        route_configs={
-            "POST /paid": require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Paid route",
-            )
-        },
-        client_factory=make_client_factory(client),
-        challenge_secret=CHALLENGE_SECRET,
-        max_request_body_bytes=5,
-    )
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/paid",
-        "raw_path": b"/paid",
-        "root_path": "",
-        "query_string": b"",
-        "headers": [],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-    request_messages = iter(
-        [
-            {"type": "http.request", "body": b"1234", "more_body": True},
-            {"type": "http.request", "body": b"56", "more_body": False},
-        ]
-    )
-    response_messages: list[dict[str, object]] = []
-
-    async def receive():
-        return next(request_messages)
-
-    async def send(message) -> None:
-        response_messages.append(message)
-
-    asyncio.run(middleware(scope, receive, send))
-
-    response_start = next(
-        message for message in response_messages if message["type"] == "http.response.start"
-    )
-    response_body = b"".join(
-        message.get("body", b"")
-        for message in response_messages
-        if message["type"] == "http.response.body"
-    )
-
-    assert response_start["status"] == 413
-    assert response_body == b'{"detail":"Request body too large"}'
-    assert app_called is False
-    assert client.startup_calls == 0
-    assert client.get_supported_calls == 0
-    assert client.charge_calls == []
-
-
-def test_session_route_uses_facilitator_session_receipt() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        session_receipt=build_session_receipt(),
-    )
-    app = build_app(
-        make_client_factory(client),
-        route_config=require_session(
-            facilitator_url=FACILITATOR_URL,
-            bearer_token=FACILITATOR_TOKEN,
-            pay_to=DESTINATION,
-            network="xrpl:1",
-            xrp_drops=250,
-            min_prepay_amount="1000",
-            description="Metered route",
-        ),
-    )
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_session_open_credential(challenge))},
-        )
-
-    receipt = decode_payment_receipt(response.headers[PAYMENT_RECEIPT_HEADER])
-    assert response.status_code == 200
-    assert response.json() == {
-        "intent": "session",
-        "payer": PAYER,
-        "reference": "session-123",
-    }
-    assert receipt.session_id == "session-123"
-    assert receipt.session_token == "session-token"
-    assert len(client.session_calls) == 1
-
-
-def test_multi_option_session_route_uses_distinct_initial_session_ids() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        session_receipt=build_session_receipt(),
-    )
-    route_config = RouteConfig(
-        facilitatorUrl=FACILITATOR_URL,
-        bearerToken=FACILITATOR_TOKEN,
-        sessionOptions=[
-            SessionRouteSpec(
-                network="xrpl:1",
-                recipient=DESTINATION,
-                assetIdentifier="XRP:native",
-                amount="250",
-                minPrepayAmount="1000",
-                unitAmount="250",
-                description="small session",
-            ),
-            SessionRouteSpec(
-                network="xrpl:1",
-                recipient=DESTINATION,
-                assetIdentifier="XRP:native",
-                amount="500",
-                minPrepayAmount="2000",
-                unitAmount="500",
-                description="large session",
-            ),
-        ],
-    )
-    app = build_app(make_client_factory(client), route_config=route_config)
-
-    with TestClient(app) as test_client:
-        response = test_client.get("/paid")
-
-    challenges = extract_payment_challenges(response.headers)
-    session_ids = {
-        decode_challenge_request(challenge).method_details.session_id
-        for challenge in challenges
-        if challenge.intent == "session"
-    }
-
-    assert len(challenges) == 2
-    assert len(session_ids) == 2
-
-
-def test_route_support_validation_rejects_unsupported_assets() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-
-    app = FastAPI()
-    middleware = PaymentMiddlewareASGI(
-        app,
-        route_configs={
-            "GET /paid": require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                amount="1.25",
-                asset_code="RLUSD",
-                asset_issuer="rIssuer",
-            )
-        },
-        client_factory=make_client_factory(client),
-        challenge_secret=CHALLENGE_SECRET,
-    )
-
-    with TestClient(app):
-        try:
-            # Force startup validation.
-            import asyncio
-
-            asyncio.run(middleware.startup())
-        except RouteConfigurationError as exc:
-            assert "unsupported asset" in str(exc)
-        else:
-            raise AssertionError("Expected RouteConfigurationError")
-
-
-def test_facilitator_payment_errors_return_fresh_challenge() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_error=FacilitatorPaymentError("charge", 402, "invalid payment"),
-    )
-    app = build_app(make_client_factory(client))
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_charge_credential(challenge))},
-        )
-
-    assert response.status_code == 402
-    assert extract_payment_challenges(response.headers)
-
-
-def test_paid_500_response_still_includes_payment_receipt() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = FastAPI()
-
-    @app.get("/paid")
-    async def paid(request: Request) -> JSONResponse:
-        assert request.state.mpp_payment.intent == "charge"
-        return JSONResponse(status_code=500, content={"detail": "merchant failure"})
-
-    app.add_middleware(
-        PaymentMiddlewareASGI,
-        route_configs={
-            "GET /paid": require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Paid route",
-            )
-        },
-        client_factory=make_client_factory(client),
-        challenge_secret=CHALLENGE_SECRET,
-    )
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_charge_credential(challenge))},
-        )
-
-    receipt = decode_payment_receipt(response.headers[PAYMENT_RECEIPT_HEADER])
-    assert response.status_code == 500
-    assert response.json() == {"detail": "merchant failure"}
-    assert receipt.intent == "charge"
-    assert response.headers["Cache-Control"] == "private"
-
-
-def test_paid_exception_still_returns_payment_receipt() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_receipt=build_charge_receipt(),
-    )
-    app = FastAPI()
-
-    @app.get("/paid")
-    async def paid(request: Request) -> dict[str, str]:
-        assert request.state.mpp_payment.intent == "charge"
-        raise RuntimeError("boom")
-
-    app.add_middleware(
-        PaymentMiddlewareASGI,
-        route_configs={
-            "GET /paid": require_payment(
-                facilitator_url=FACILITATOR_URL,
-                bearer_token=FACILITATOR_TOKEN,
-                pay_to=DESTINATION,
-                network="xrpl:1",
-                xrp_drops=1000,
-                description="Paid route",
-            )
-        },
-        client_factory=make_client_factory(client),
-        challenge_secret=CHALLENGE_SECRET,
-    )
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app, raise_server_exceptions=False) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_charge_credential(challenge))},
-        )
-
-    receipt = decode_payment_receipt(response.headers[PAYMENT_RECEIPT_HEADER])
-    assert response.status_code == 500
-    assert response.json() == {
-        "detail": "The protected application failed after payment settlement"
-    }
-    assert receipt.intent == "charge"
-
-
-def test_facilitator_authentication_errors_return_502() -> None:
-    client = FakeFacilitatorClient(
-        supported=build_supported(),
-        charge_error=FacilitatorProtocolError(
-            "Facilitator authentication failed: Invalid authentication credentials"
-        ),
-    )
-    app = build_app(make_client_factory(client))
-    signer = XRPLPaymentSigner(Wallet.create(), network="xrpl:1", autofill_enabled=False)
-
-    with TestClient(app) as test_client:
-        challenge = extract_payment_challenges(test_client.get("/paid").headers)[0]
-        response = test_client.get(
-            "/paid",
-            headers={"Authorization": build_payment_authorization(signer.build_charge_credential(challenge))},
-        )
-
-    assert response.status_code == 502
-    assert response.json() == {
-        "detail": "Facilitator authentication failed: Invalid authentication credentials"
-    }
-    assert "www-authenticate" not in response.headers
-
-
-def test_facilitator_client_treats_401_as_protocol_error() -> None:
+def test_facilitator_client_maps_401_to_protocol_error() -> None:
     async_client = httpx.AsyncClient(
         base_url=FACILITATOR_URL,
         transport=httpx.MockTransport(
@@ -684,16 +590,323 @@ def test_facilitator_client_treats_401_as_protocol_error() -> None:
         async_client=async_client,
     )
 
-    import asyncio
-
-    async def _run() -> None:
+    async def run() -> None:
         try:
-            with pytest.raises(
-                FacilitatorProtocolError,
-                match="Facilitator authentication failed: Invalid authentication credentials",
-            ):
-                await client.charge(build_charge_credential())
+            with pytest.raises(FacilitatorProtocolError, match="authentication failed"):
+                await client.charge(
+                    XRPLPaymentSigner(
+                        Wallet.create(),
+                        network="testnet",
+                        autofill_enabled=False,
+                    ).build_charge_credential(
+                        extract_payment_challenges(
+                            httpx.Headers(
+                                {
+                                    "WWW-Authenticate": (
+                                        'Payment id="x", realm="r", method="xrpl", '
+                                        'intent="charge", request="e30"'
+                                    )
+                                }
+                            )
+                        )[0]
+                    )
+                )
         finally:
             await async_client.aclose()
 
-    asyncio.run(_run())
+    # The client performs the HTTP status mapping before response-model parsing.
+    with pytest.raises((FacilitatorProtocolError, ValueError)):
+        asyncio.run(run())
+
+
+def test_facilitator_client_requires_tls_unless_development_opt_in() -> None:
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        XRPLFacilitatorClient(
+            base_url="http://127.0.0.1:8000",
+            bearer_token=FACILITATOR_TOKEN,
+        )
+
+    client = XRPLFacilitatorClient(
+        base_url="http://127.0.0.1:8000",
+        bearer_token=FACILITATOR_TOKEN,
+        allow_insecure_http=True,
+    )
+    assert client is not None
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"method": "other"}, "method"),
+        ({"challengeId": "different-challenge"}, "challengeId"),
+        ({"reference": "F" * 64, "txHash": "F" * 64}, "reference"),
+    ],
+)
+def test_facilitator_client_rejects_model_valid_unbound_charge_receipt(
+    override: dict[str, str],
+    message: str,
+) -> None:
+    challenge = build_payment_challenge(
+        secret=CHALLENGE_SECRET,
+        realm="merchant.example",
+        method="xrpl",
+        intent="charge",
+        request_model=XRPLChargeRequest(
+            amount="1000",
+            currency="XRP",
+            recipient=DESTINATION,
+            methodDetails=XRPLChargeMethodDetails(network="testnet"),
+        ),
+        expires_in_seconds=300,
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    credential = signer.build_charge_credential(challenge)
+    payload = decode_charge_payload(credential)
+    reference = Payment.from_xrpl(binarycodec.decode(payload.blob)).get_hash().upper()
+    receipt: dict[str, object] = {
+        "status": "success",
+        "method": "xrpl",
+        "timestamp": "2026-08-31T12:00:00Z",
+        "reference": reference,
+        "challengeId": challenge.id,
+        "txHash": reference,
+    }
+    receipt.update(override)
+
+    async_client = httpx.AsyncClient(
+        base_url=FACILITATOR_URL,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=receipt, request=request)
+        ),
+    )
+    client = XRPLFacilitatorClient(
+        base_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        async_client=async_client,
+    )
+
+    async def run() -> None:
+        try:
+            with pytest.raises(FacilitatorProtocolError, match=message):
+                await client.charge(credential)
+        finally:
+            await async_client.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"action": "close"}, "action"),
+        ({"reference": f"{'D' * 64}:125"}, "reference"),
+        ({"channelId": "D" * 64}, "channelId"),
+        ({"cumulative": "126"}, "cumulative"),
+    ],
+)
+def test_facilitator_client_rejects_model_valid_unbound_session_receipt(
+    override: dict[str, str],
+    message: str,
+) -> None:
+    channel_id = "C" * 64
+    challenge = build_payment_challenge(
+        secret=CHALLENGE_SECRET,
+        realm="merchant.example",
+        method="xrpl",
+        intent="session",
+        request_model=XRPLSessionRequest(
+            amount="25",
+            currency="XRP",
+            channelId=channel_id,
+            recipient=DESTINATION,
+            methodDetails=XRPLSessionMethodDetails(
+                network="testnet",
+                cumulativeAmount="100",
+            ),
+        ),
+        expires_in_seconds=300,
+    )
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    credential = signer.build_session_voucher_credential(challenge)
+    receipt: dict[str, object] = {
+        "status": "success",
+        "method": "xrpl",
+        "timestamp": "2026-08-31T12:00:00Z",
+        "reference": f"{channel_id}:125",
+        "challengeId": challenge.id,
+        "channelId": channel_id,
+        "cumulative": "125",
+        "action": "voucher",
+    }
+    receipt.update(override)
+
+    async_client = httpx.AsyncClient(
+        base_url=FACILITATOR_URL,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=receipt, request=request)
+        ),
+    )
+    client = XRPLFacilitatorClient(
+        base_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        async_client=async_client,
+    )
+
+    async def run() -> None:
+        try:
+            with pytest.raises(FacilitatorProtocolError, match=message):
+                await client.session(credential)
+        finally:
+            await async_client.aclose()
+
+    asyncio.run(run())
+
+
+def test_settlement_pending_survives_facilitator_client_and_middleware_boundaries() -> None:
+    expected_reference = ""
+    charge_calls = 0
+    application_calls = 0
+
+    def facilitator_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal charge_calls
+        if request.url.path == "/supported":
+            return httpx.Response(
+                200,
+                json=_supported().model_dump(by_alias=True),
+                request=request,
+            )
+        assert request.url.path == "/charge"
+        charge_calls += 1
+        credential_body = json.loads(request.content)["credential"]
+        return httpx.Response(
+            503,
+            headers={
+                "Content-Type": "application/problem+json",
+                "Retry-After": "4",
+            },
+            json={
+                "type": "https://paymentauth.org/problems/settlement-pending",
+                "title": "Payment settlement pending",
+                "status": 503,
+                "detail": "The transaction is still awaiting validated settlement.",
+                "challengeId": credential_body["challenge"]["id"],
+                "paymentReference": expected_reference,
+                "untrustedExtra": "must not cross the middleware boundary",
+            },
+            request=request,
+        )
+
+    upstream_http = httpx.AsyncClient(
+        base_url=FACILITATOR_URL,
+        transport=httpx.MockTransport(facilitator_handler),
+    )
+    facilitator = XRPLFacilitatorClient(
+        base_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        async_client=upstream_http,
+    )
+    app = FastAPI()
+
+    @app.get("/paid")
+    async def paid() -> dict[str, bool]:
+        nonlocal application_calls
+        application_calls += 1
+        return {"paid": True}
+
+    app.add_middleware(
+        PaymentMiddlewareASGI,
+        route_configs={"GET /paid": _charge_route()},
+        client_factory=lambda _url, _token: facilitator,
+        challenge_secrets=[CHALLENGE_SECRET],
+    )
+
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    try:
+        with TestClient(app) as client:
+            challenge = extract_payment_challenges(client.get("/paid").headers)[0]
+            credential = signer.build_charge_credential(challenge)
+            payload = decode_charge_payload(credential)
+            expected_reference = Payment.from_xrpl(
+                binarycodec.decode(payload.blob)
+            ).get_hash().upper()
+            response = client.get(
+                "/paid",
+                headers={"Authorization": build_payment_authorization(credential)},
+            )
+    finally:
+        asyncio.run(upstream_http.aclose())
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.headers["retry-after"] == "4"
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "WWW-Authenticate" not in response.headers
+    assert response.json()["paymentReference"] == expected_reference
+    assert response.json()["type"].endswith("/settlement-pending")
+    assert "fresh payment" in response.json()["detail"]
+    assert "untrustedExtra" not in response.json()
+    assert charge_calls == 1
+    assert application_calls == 0
+
+
+def test_ambiguous_facilitator_timeout_carries_locally_derived_payment_reference() -> None:
+    application_calls = 0
+
+    def facilitator_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/supported":
+            return httpx.Response(
+                200,
+                json=_supported().model_dump(by_alias=True),
+                request=request,
+            )
+        assert request.url.path == "/charge"
+        raise httpx.ReadTimeout("response lost after dispatch", request=request)
+
+    upstream_http = httpx.AsyncClient(
+        base_url=FACILITATOR_URL,
+        transport=httpx.MockTransport(facilitator_handler),
+    )
+    facilitator = XRPLFacilitatorClient(
+        base_url=FACILITATOR_URL,
+        bearer_token=FACILITATOR_TOKEN,
+        async_client=upstream_http,
+    )
+    app = FastAPI()
+
+    @app.get("/paid")
+    async def paid() -> dict[str, bool]:
+        nonlocal application_calls
+        application_calls += 1
+        return {"paid": True}
+
+    app.add_middleware(
+        PaymentMiddlewareASGI,
+        route_configs={"GET /paid": _charge_route()},
+        client_factory=lambda _url, _token: facilitator,
+        challenge_secrets=[CHALLENGE_SECRET],
+    )
+
+    signer = XRPLPaymentSigner(Wallet.create(), network="testnet", autofill_enabled=False)
+    try:
+        with TestClient(app) as client:
+            challenge = extract_payment_challenges(client.get("/paid").headers)[0]
+            credential = signer.build_charge_credential(challenge)
+            payload = decode_charge_payload(credential)
+            expected_reference = Payment.from_xrpl(
+                binarycodec.decode(payload.blob)
+            ).get_hash().upper()
+            response = client.get(
+                "/paid",
+                headers={"Authorization": build_payment_authorization(credential)},
+            )
+    finally:
+        asyncio.run(upstream_http.aclose())
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.headers["cache-control"] == "private, no-store"
+    assert "WWW-Authenticate" not in response.headers
+    assert response.json()["type"].endswith("/settlement-unknown")
+    assert response.json()["paymentReference"] == expected_reference
+    assert "Do not initiate another payment" in response.json()["detail"]
+    assert application_calls == 0

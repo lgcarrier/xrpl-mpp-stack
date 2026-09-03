@@ -1,80 +1,93 @@
-# Payment Flow
+# Payment flows
 
-## Charge
-
-```mermaid
-sequenceDiagram
-    participant Buyer
-    participant Middleware
-    participant Facilitator
-    participant App as Seller App
-
-    Buyer->>Middleware: Request protected route
-    Middleware-->>Buyer: 402 + WWW-Authenticate: Payment (charge)
-    Buyer->>Buyer: Sign XRPL Payment with challenge invoiceId
-    Buyer->>Middleware: Retry with Authorization: Payment
-    Middleware->>Facilitator: POST /charge
-    Facilitator->>Facilitator: Validate and settle XRPL transaction
-    Facilitator-->>Middleware: PaymentReceipt
-    Middleware->>App: Forward paid request
-    App-->>Middleware: Protected response
-    Middleware-->>Buyer: 200 + Payment-Receipt
-```
-
-1. A buyer requests a protected resource.
-2. The middleware returns `402 Payment Required` with `WWW-Authenticate: Payment`.
-3. The buyer decodes the challenge request and signs an XRPL `Payment`.
-4. The buyer retries with `Authorization: Payment`.
-5. The middleware forwards the credential to the facilitator.
-6. The facilitator validates and settles the XRPL transaction.
-7. The app receives `request.state.mpp_payment`, and the response includes `Payment-Receipt`.
-
-## Session
+## One-time charge
 
 ```mermaid
 sequenceDiagram
-    participant Buyer
-    participant Middleware
-    participant Facilitator
-    participant App as Seller App
+    participant B as Buyer
+    participant S as Seller middleware
+    participant F as Facilitator
+    participant X as XRPL
+    participant A as Seller app
 
-    Buyer->>Middleware: Request session-protected route
-    Middleware-->>Buyer: 402 + WWW-Authenticate: Payment (session)
-    Buyer->>Buyer: Sign XRPL prepay with challenge sessionId
-    Buyer->>Middleware: Authorization: Payment (open) + X-MPP-Session-Id
-    Middleware->>Facilitator: POST /session (action=open)
-    Facilitator-->>Middleware: Session receipt + sessionToken
-    Middleware->>App: Forward paid request
-    App-->>Middleware: Protected response
-    Middleware-->>Buyer: 200 + Payment-Receipt
-
-    Note over Buyer,Facilitator: Later requests reuse the same session token
-    Buyer->>Middleware: Authorization: Payment (use)
-    Middleware->>Facilitator: POST /session (action=use)
-    Facilitator-->>Middleware: Usage receipt
-    Middleware->>App: Forward paid request
-    App-->>Middleware: Protected response
-    Middleware-->>Buyer: 200 + Payment-Receipt
-
-    opt Session balance too low
-        Buyer->>Middleware: Authorization: Payment (top_up)
-        Middleware->>Facilitator: POST /session (action=top_up)
-        Facilitator->>Facilitator: Validate XRPL top-up transaction
-        Facilitator-->>Middleware: Updated session receipt
-        Middleware-->>Buyer: 200 + Payment-Receipt
+    B->>S: Request + Accept-Payment
+    S-->>B: 402 + charge challenge
+    B->>B: Validate terms, bind InvoiceID, sign
+    B->>S: One retry + Payment credential
+    S->>F: POST /charge (gateway bearer auth)
+    alt transaction blob
+        F->>F: Decode and validate exact transaction
+        F->>X: Submit and await validation
+    else transaction hash
+        F->>X: Resolve submitted transaction
+        F->>F: Validate exact transaction
     end
-
-    opt Session finished
-        Buyer->>Middleware: Authorization: Payment (close)
-        Middleware->>Facilitator: POST /session (action=close)
-        Facilitator-->>Middleware: Closed session receipt
-        Middleware-->>Buyer: 200 + Payment-Receipt
-    end
+    F-->>S: Successful receipt
+    S->>A: Request + request.state.mpp_payment
+    A-->>S: 2xx response
+    S-->>B: 2xx + Payment-Receipt
 ```
 
-1. A buyer requests a session-protected resource.
-2. The middleware returns a `session` challenge.
-3. The buyer opens the session with a prepaid XRPL transaction.
-4. Later requests reuse the session with `action="use"`.
-5. If balance runs low, the buyer sends `action="top_up"`.
-6. When finished, the buyer sends `action="close"`.
+The signer uses a challenge-provided `invoiceId`, or derives a deterministic
+64-hex InvoiceID from the challenge ID. The credential source is the payer's
+XRPL DID. Challenge-provided destination/source tags and memos are copied into
+the transaction and verified. Access is granted only for a matching successful
+validated transaction; an accepted submission is not settlement.
+
+## PaymentChannel session
+
+```mermaid
+sequenceDiagram
+    participant B as Buyer
+    participant S as Seller middleware
+    participant F as Facilitator
+    participant X as XRPL
+
+    B->>S: Request accepting xrpl/session
+    S-->>B: 402 + open challenge
+    B->>S: PaymentChannelCreate blob + signed claim
+    S->>F: POST /session (action=open)
+    F->>X: Validate/submit channel creation
+    F-->>S: receipt with channelId
+    S-->>B: 2xx + Payment-Receipt
+    B->>S: Later request with channel ID/high-water hints
+    S-->>B: 402 + higher cumulative amount
+    B->>S: Signed cumulative voucher
+    S->>F: POST /session (action=voucher)
+    F->>F: Atomically advance high-water mark
+    F-->>S: receipt with cumulative amount
+    S-->>B: 2xx + Payment-Receipt
+```
+
+The seller challenges for a cumulative channel amount. A buyer proves the new
+total with an XRPL PaymentChannel claim signature. The server charges only the
+delta from the accepted high-water mark and rejects non-advancing claims.
+
+`close` is an explicit final voucher. Its receipt can record the final
+`channelId`, `cumulative`, and redemption reference, but the MPP action itself
+is not an XRPL channel close or refund. When the facilitator has the optional
+recipient seed, it can submit the retained cumulative claim and await validated
+redemption. That recipient-side `PaymentChannelClaim` does not set `tfClose`;
+only the funder can initiate the on-ledger close that eventually returns unused
+XRP. Without a recipient signer, the session is durably finalized while its
+final voucher remains off-ledger and must be redeemed separately.
+
+Channel creation and funding can also happen outside the MPP exchange. A
+matching existing channel is imported from validated ledger state on the first
+voucher/close. `PaymentChannelFund` is submitted directly to XRPL, and a later
+voucher causes the facilitator to adopt the validated increased funding.
+
+## Error boundary
+
+- Missing payment produces `402` plus a fresh challenge.
+- Malformed, expired, mismatched, replayed, or failed evidence does not reach the
+  protected application.
+- A facilitator verification failure is returned as a payment problem, not a
+  receipt.
+- If a charge hash, pull submission, or channel-open transaction may have
+  reached XRPL but validation is not yet observable, the facilitator returns a
+  non-cacheable `503 settlement-pending` problem with `Retry-After` and the
+  locally derived transaction hash. The buyer must reconcile that hash and
+  retry the same proof; it must not create a fresh payment or channel.
+- If the application returns an error after verification, middleware must not
+  attach `Payment-Receipt` to that error response.

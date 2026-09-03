@@ -1,73 +1,42 @@
-# Middleware
+# `xrpl-mpp-middleware`
 
-`xrpl-mpp-middleware` protects seller routes with MPP HTTP payment challenges.
-
-## Use It When
-
-Use this package inside an ASGI or FastAPI seller app when you want selected
-routes to return `402 Payment Required` until the buyer completes an XRPL-backed
-MPP flow.
-
-## Install
+Install:
 
 ```bash
 pip install xrpl-mpp-middleware
 ```
 
-## Main APIs
+The package protects ASGI routes and connects a seller application to an
+authenticated facilitator.
 
-Use:
+## Route protection
 
-- `require_payment(...)` for one-shot `charge`
-- `require_session(...)` for prepaid `session`
-- `PaymentMiddlewareASGI(...)` to wire challenges and facilitator validation into an ASGI app
+- `PaymentMiddlewareASGI`
+- `require_payment(...)` for one-time charge offers
+- `require_session(...)` for XRP PaymentChannel offers
+- `ChargeRouteSpec`, `SessionRouteSpec`, and `RouteConfig`
+- request-body limits and exact request-digest binding
+- multiple challenges and `Accept-Payment` negotiation
+- ordinary bearer-auth preservation with `Payment-Authorization`
 
-Verified receipts are exposed as `request.state.mpp_payment`.
+After verification, the receipt is available as `request.state.mpp_payment`.
+Middleware adds `Payment-Receipt` only to a successful downstream response.
 
-`WWW-Authenticate` and `Authorization` scheme matching is case-insensitive, though examples keep the canonical `Payment` casing.
+## Discovery
 
-Protected routes enforce a request body limit of `32768` bytes by default. Override it with `PaymentMiddlewareASGI(..., max_request_body_bytes=...)`; oversized protected requests return `413 {"detail":"Request body too large"}` before facilitator or app processing.
+`xrpl_mpp_middleware.discovery` creates draft-01 OpenAPI `x-payment-info` and
+`x-service-info` extensions from route configuration. It supports multi-offer
+`charge` and `session` metadata and marks non-integer pricing as dynamic.
 
-## Minimal Charge Example
+## Hooks
 
-```python
-from fastapi import FastAPI
-from xrpl_mpp_middleware import PaymentMiddlewareASGI, require_payment
+`xrpl_mpp_middleware.hooks` provides immutable typed lifecycle events and a
+bounded asynchronous dispatcher. Callbacks receive identifiers and safe
+outcomes, not credentials or wallet material. Failure policy is explicit.
 
-app = FastAPI()
+## Outcome relay
 
-app.add_middleware(
-    PaymentMiddlewareASGI,
-    route_configs={
-        "GET /premium": require_payment(
-            facilitator_url="http://127.0.0.1:8000",
-            bearer_token="replace-with-your-facilitator-token",
-            pay_to="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
-            network="xrpl:1",
-            xrp_drops=1000,
-            description="One premium request",
-        )
-    },
-    challenge_secret="replace-with-a-shared-secret",
-)
-```
-
-## Session Routes
-
-Use `require_session(...)` when you want one XRPL prepayment to cover multiple
-requests on the same protected route. The middleware:
-
-- emits a `session` challenge with `sessionId`, `unitAmount`, and `minPrepayAmount`
-- forwards `open`, `use`, `top_up`, and `close` actions to the facilitator
-- exposes the verified receipt to the app just like a `charge` flow
-
-The buyer reuses `X-MPP-Session-Id` to associate follow-up requests with the same
-session.
-
-## Route Configuration Notes
-
-- Route keys use `"METHOD /path"` syntax such as `"GET /premium"`.
-- Each protected route can accept `charge`, `session`, or both depending on the
-  route config you choose.
-- The middleware computes a request body digest and binds it into the challenge so
-  the paid retry matches the exact protected request payload.
+`xrpl_mpp_middleware.relay` provides an opt-in HTTPS relay for an allowlisted
+validated receipt projection. It adds idempotency, bounds timeouts, blocks
+unsafe endpoints, and rejects sensitive-key names. This is application
+architecture, not part of the MPP wire contract.

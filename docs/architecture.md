@@ -1,116 +1,96 @@
-# Architecture Overview
+# Architecture and standards boundary
 
-`xrpl-mpp-stack` is a Python-first implementation of the Machine Payments
-Protocol (MPP) on XRPL.
+The repository is a non-custodial integration stack. The buyer controls its
+wallet; the seller challenges and gates requests; the facilitator verifies or
+submits XRPL evidence. Redis stores replay and channel high-water state, not
+wallet secrets. Recipient claim redemption is the deliberate key-bearing
+exception. Production deployments can inject a KMS/HSM-backed `RecipientSigner`;
+`PAYCHANNEL_RECIPIENT_SEED` is a local-wallet adapter and must be isolated as
+key-bearing infrastructure when used.
 
-The stack keeps payment signing buyer-side, settlement logic facilitator-side,
-and seller application logic inside the protected app.
-
-## Runtime Topology
+## Components
 
 ```mermaid
 flowchart LR
-    Buyer["Buyer App or Payer"]
-    Seller["Seller App + PaymentMiddlewareASGI"]
-    Facilitator["xrpl-mpp-facilitator"]
-    Redis["Redis"]
-    XRPL["XRPL JSON-RPC / Ledger"]
-    App["Protected Route Logic"]
-
-    Buyer -->|"Request + paid retry"| Seller
-    Seller -->|"POST /charge or /session"| Facilitator
-    Facilitator --> Redis
-    Facilitator --> XRPL
-    Buyer -->|"autofill / signer RPC"| XRPL
-    Seller --> App
+    B[Buyer or agent] -->|HTTP request| M[Seller ASGI middleware]
+    M -->|Bearer-authenticated verification| F[Facilitator]
+    F -->|submit or query| X[XRPL]
+    M --> A[Seller application]
+    B -. native _meta .-> P[MCP payment processor]
+    M -. optional sanitized outcome .-> R[Application relay endpoint]
 ```
 
-## Component Roles
-
-| Component | Responsibility | Holds persistent state? |
+| Layer | Responsibility | Standards status |
 | --- | --- | --- |
-| Buyer app or `xrpl-mpp-payer` | Selects a challenge, signs XRPL payments, retries protected requests. | Local receipts only when using payer. |
-| Seller app with `PaymentMiddlewareASGI` | Emits MPP `402` challenges, validates paid retries through the facilitator, injects receipts into the request state. | No. |
-| Facilitator | Validates and settles presigned XRPL transactions, manages prepaid session state, enforces replay and freshness rules. | Redis-backed replay/session state. |
-| Redis | Stores replay markers, gateway auth records, rate-limit state, and session balances. | Yes. |
-| XRPL | Final settlement layer for charge payments and session top-ups. | On-ledger. |
+| MPP HTTP authentication | Challenge, credential, preference, and receipt fields | Normative MPP core draft |
+| `xrpl` charge/session payloads | XRPL payment and PaymentChannel semantics | Ripple-compatible method profile |
+| OpenAPI `x-payment-info` | Preflight offers | Payment discovery draft-01 |
+| MCP `_meta` transport | Paid MCP operations and payment errors | MPP MCP transport draft |
+| hooks and outcome relay | Telemetry and application integration | Non-normative, opt-in |
 
-## Package Map
+## Charge
 
-| Package | Layer | Use it for |
-| --- | --- | --- |
-| `xrpl-mpp-core` | Shared protocol layer | Header models, codecs, asset helpers, challenge/receipt encoding. |
-| `xrpl-mpp-middleware` | Seller integration layer | Route protection, challenge generation, facilitator coordination. |
-| `xrpl-mpp-facilitator` | Settlement layer | `GET /supported`, `POST /charge`, `POST /session`, replay and session enforcement. |
-| `xrpl-mpp-client` | Buyer SDK | HTTPX transport, signer integration, automatic charge/session retries. |
-| `xrpl-mpp-payer` | Buyer runtime | CLI, proxy, receipts, spend caps, and MCP tooling. |
+A seller creates one or more `xrpl` / `charge` challenges. A buyer validates the
+terms and returns either:
 
-## Charge Intent
+- `{ "type": "transaction", "blob": "..." }` for facilitator submission; or
+- `{ "type": "hash", "hash": "..." }` after payer-side submission.
 
-For `charge`, every protected request maps to one XRPL payment:
+The facilitator validates the decoded transaction or resolved hash against the
+challenge: network, destination, currency, exact amount, invoice, source,
+tags, memos, settlement result, and replay state. Partial payments are rejected.
+Both pull and push paths require successful validated ledger settlement before
+the protected application runs.
 
-1. buyer requests a protected route
-2. middleware returns `402 Payment Required` with `WWW-Authenticate: Payment`
-3. buyer signs an XRPL `Payment` using the challenge `invoiceId`
-4. buyer retries with `Authorization: Payment`
-5. middleware forwards the credential to the facilitator
-6. facilitator validates and settles the transaction
-7. middleware forwards the request to the app and adds `Payment-Receipt`
+## Session with Payment Channels
 
-See [Payment Flow](how-it-works/payment-flow.md) for the sequence diagram and
-[Header Contract](how-it-works/header-contract.md) for the exact wire format.
+The `session` intent represents an XRPL Payment Channel, not an application
+balance. The buyer may submit a signed `PaymentChannelCreate` transaction for
+`open`, then signed cumulative claims for `voucher`, and an optional final
+claim for `close`.
 
-## Session Intent
+The cumulative claim is the channel total, not the price of the current HTTP
+request. Atomic state rejects equal, lower, conflicting, replayed, or
+cross-network claims. No bearer-like session credential is created.
 
-For `session`, one XRPL prepayment can cover multiple requests:
+The facilitator may import a matching channel from validated ledger state when
+the first proof is a voucher/close rather than an MPP-managed open. An
+out-of-band `PaymentChannelFund` is detected through later ledger verification
+and can raise the durable funding ceiling; it is not an MPP top-up action.
 
-1. seller emits a `session` challenge with `sessionId`, `unitAmount`, and `minPrepayAmount`
-2. buyer opens the session with a signed XRPL transaction
-3. later requests reuse the facilitator-issued `sessionToken`
-4. the buyer can top up or close the session explicitly
+An MPP `close` is a final cumulative voucher. With an explicitly configured
+recipient signer, the facilitator can redeem that claim on-ledger and await
+validation. Recipient redemption does not set `tfClose`, delete the PayChannel,
+or refund unused XRP. Without a recipient signer, the service durably finalizes
+the MPP session and retains the final proof, but does not claim on-ledger closure
+or settlement. Only the funder can initiate the
+XRPL close/refund path, with `CancelAfter` as the time-based alternative.
 
-The facilitator stores session state in Redis and only submits new XRPL
-transactions for `open` and `top_up`.
+An opt-in maintenance worker scans a bounded page of network-namespaced channel
+records, obtains a per-channel Redis lease, and redeems an outstanding high-water
+claim. It may finalize an idle MPP session after redemption, but the signed
+recipient transaction is field-locked to `Flags=0`; it cannot request the
+funder-only XRPL `tfClose` transition. Both explicit close and idle finalization
+compare-and-set the expected cumulative amount so a concurrently newer voucher
+remains active and redeemable instead of being finalized under an older claim.
 
-## Trust And State Boundaries
+## Receipt boundary
 
-- The buyer keeps the XRPL seed. The facilitator never holds the buyer private key.
-- The seller app does not verify XRPL transactions directly. It delegates that work to the facilitator.
-- Redis holds replay markers and session balances, not customer account custody.
-- In `single_token` mode, middleware authenticates to the facilitator with one shared bearer token.
-- In `redis_gateways` mode, the facilitator authenticates per-gateway tokens from Redis and enforces stricter ledger-window freshness.
+The required MPP receipt fields are:
 
-## Common Topologies
+- `status`
+- `method`
+- `timestamp`
+- `reference`
 
-### Local Docker Demo
+Fields such as `challengeId`, `network`, `invoiceId`, `channelId`, `cumulative`,
+`action`, `txHash`, and `settlementStatus` are XRPL method extensions. Consumers
+must ignore unknown extensions and must not infer payment success from a receipt
+on a failed application response.
 
-- facilitator, merchant, and Redis run under `docker compose`
-- buyer runs as the demo container or a local script
-- network defaults to XRPL Testnet
+## Unsupported profile
 
-Start here:
-
-- [Guided Quickstart: Testnet XRP](quickstart/testnet-xrp.md)
-- [Run Demo Variants](quickstart/demo-variants.md)
-
-### Embedded Seller App
-
-- your FastAPI or Starlette app runs `PaymentMiddlewareASGI`
-- a separate `xrpl-mpp-facilitator` service validates payments
-- both sides share the MPP challenge secret and auth configuration
-
-Next:
-
-- [Seller Integration](integrations/seller.md)
-- [Deployment Modes](configuration/deployment-modes.md)
-
-### Buyer Integration
-
-- application buyers use `xrpl-mpp-client`
-- operators and agent tooling can use `xrpl-mpp-payer`
-- both support XRP and issued assets such as RLUSD and USDC
-
-Next:
-
-- [Buyer Integration](integrations/buyer.md)
-- [Configuration](configuration.md)
+MPP defines an independent generic subscription intent draft. Neither the MPP
+core nor that draft defines XRPL subscription settlement. Until an XRPL method
+profile exists and is implemented here, subscription challenges are not
+advertised or settled by this stack.

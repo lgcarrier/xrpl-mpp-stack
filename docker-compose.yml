@@ -9,18 +9,33 @@ services:
     environment:
       GATEWAY_AUTH_MODE: ${GATEWAY_AUTH_MODE:-single_token}
       XRPL_RPC_URL: ${XRPL_RPC_URL:-https://s.altnet.rippletest.net:51234}
+      ALLOW_INSECURE_XRPL_RPC: ${ALLOW_INSECURE_XRPL_RPC:-false}
       MY_DESTINATION_ADDRESS: ${MY_DESTINATION_ADDRESS:-rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe}
       FACILITATOR_BEARER_TOKEN: ${FACILITATOR_BEARER_TOKEN:-local-facilitator-token}
       REDIS_URL: redis://redis:6379/0
-      NETWORK_ID: ${NETWORK_ID:-xrpl:1}
+      NETWORK_ID: ${NETWORK_ID:-testnet}
       SETTLEMENT_MODE: ${SETTLEMENT_MODE:-validated}
+      VALIDATION_TIMEOUT: ${VALIDATION_TIMEOUT:-15}
+      MIN_XRP_DROPS: ${MIN_XRP_DROPS:-1000}
       ALLOWED_ISSUED_ASSETS: ${ALLOWED_ISSUED_ASSETS:-}
+      ALLOWED_MPT_ISSUANCE_IDS: ${ALLOWED_MPT_ISSUANCE_IDS:-}
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      MAX_REQUEST_BODY_BYTES: ${MAX_REQUEST_BODY_BYTES:-32768}
+      REPLAY_PROCESSED_TTL_SECONDS: ${REPLAY_PROCESSED_TTL_SECONDS:-604800}
+      MAX_PAYMENT_LEDGER_WINDOW: ${MAX_PAYMENT_LEDGER_WINDOW:-20}
       MPP_CHALLENGE_SECRET: ${MPP_CHALLENGE_SECRET:-local-mpp-challenge-secret}
+      MPP_CHALLENGE_PREVIOUS_SECRETS: ${MPP_CHALLENGE_PREVIOUS_SECRETS:-}
       MPP_DEFAULT_REALM: ${MPP_DEFAULT_REALM:-merchant.local}
       MPP_CHALLENGE_TTL_SECONDS: ${MPP_CHALLENGE_TTL_SECONDS:-300}
-      SESSION_IDLE_TIMEOUT_SECONDS: ${SESSION_IDLE_TIMEOUT_SECONDS:-900}
-      SESSION_STATE_TTL_SECONDS: ${SESSION_STATE_TTL_SECONDS:-604800}
+      PAYCHANNEL_PAYER_PUBLIC_KEY: ${PAYCHANNEL_PAYER_PUBLIC_KEY:-}
+      PAYCHANNEL_RECIPIENT_SEED: ${PAYCHANNEL_RECIPIENT_SEED:-}
+      PAYCHANNEL_MIN_SETTLE_DELAY: ${PAYCHANNEL_MIN_SETTLE_DELAY:-3600}
+      PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS: ${PAYCHANNEL_SETTLEMENT_MARGIN_SECONDS:-60}
+      PAYCHANNEL_MAX_REDEMPTION_FEE_DROPS: ${PAYCHANNEL_MAX_REDEMPTION_FEE_DROPS:-1000}
+      PAYCHANNEL_REDEEM_INTERVAL_SECONDS: ${PAYCHANNEL_REDEEM_INTERVAL_SECONDS:-0}
+      PAYCHANNEL_IDLE_CLOSE_SECONDS: ${PAYCHANNEL_IDLE_CLOSE_SECONDS:-0}
+      PAYCHANNEL_REDEEM_BATCH_SIZE: ${PAYCHANNEL_REDEEM_BATCH_SIZE:-100}
+      PAYCHANNEL_REDEEM_LEASE_SECONDS: ${PAYCHANNEL_REDEEM_LEASE_SECONDS:-75}
     restart: unless-stopped
   merchant:
     build: .
@@ -29,18 +44,26 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:${MERCHANT_PORT:-8010}:8010"
-    command: ["uvicorn", "examples.merchant_fastapi.app:app", "--host", "0.0.0.0", "--port", "8010"]
+    # Explicit local-development opt-in for the private Compose HTTP hop.
+    # Production deployments should use the normal app with an HTTPS facilitator.
+    command:
+      - python
+      - -c
+      - |
+        import uvicorn
+        from examples.merchant_fastapi.app import create_app
+        from xrpl_mpp_middleware import XRPLFacilitatorClient
+        local_client = lambda url, token: XRPLFacilitatorClient(base_url=url, bearer_token=token, allow_insecure_http=True)
+        uvicorn.run(create_app(client_factory=local_client), host="0.0.0.0", port=8010)
     environment:
       FACILITATOR_URL: http://facilitator:8000
       FACILITATOR_TOKEN: ${FACILITATOR_BEARER_TOKEN:-local-facilitator-token}
       MERCHANT_XRPL_ADDRESS: ${MY_DESTINATION_ADDRESS:-rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe}
-      XRPL_NETWORK: ${NETWORK_ID:-xrpl:1}
+      XRPL_NETWORK: ${NETWORK_ID:-testnet}
       MPP_CHALLENGE_SECRET: ${MPP_CHALLENGE_SECRET:-local-mpp-challenge-secret}
       MPP_DEFAULT_REALM: ${MPP_DEFAULT_REALM:-merchant.local}
-      PRICE_DROPS: ${PRICE_DROPS:-1000}
-      PRICE_ASSET_CODE: ${PRICE_ASSET_CODE:-XRP}
-      PRICE_ASSET_ISSUER: ${PRICE_ASSET_ISSUER:-}
-      PRICE_ASSET_AMOUNT: ${PRICE_ASSET_AMOUNT:-}
+      PRICE_AMOUNT: ${PRICE_AMOUNT:-1000}
+      PRICE_CURRENCY: ${PRICE_CURRENCY:-XRP}
     restart: unless-stopped
   buyer:
     profiles: ["demo"]
@@ -52,9 +75,13 @@ services:
     environment:
       TARGET_URL: http://merchant:8010/premium
       XRPL_RPC_URL: ${XRPL_RPC_URL:-https://s.altnet.rippletest.net:51234}
-      XRPL_NETWORK: ${XRPL_NETWORK:-xrpl:1}
+      XRPL_NETWORK: ${XRPL_NETWORK:-testnet}
       XRPL_WALLET_SEED: ${XRPL_WALLET_SEED:-}
-      PAYMENT_ASSET: ${PAYMENT_ASSET:-XRP:native}
+      PAYMENT_CURRENCY: ${PAYMENT_CURRENCY:-XRP}
+      PRICE_AMOUNT: ${PRICE_AMOUNT:-1000}
+      MY_DESTINATION_ADDRESS: ${MY_DESTINATION_ADDRESS:-rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe}
+      XRPL_MPP_MAX_SPEND: ${XRPL_MPP_MAX_SPEND:-}
+      XRPL_MPP_EXPECTED_RECIPIENT: ${XRPL_MPP_EXPECTED_RECIPIENT:-}
   buyer-agent-mcp:
     profiles: ["buyer-agent-mcp"]
     build: .
@@ -64,9 +91,16 @@ services:
     command: ["xrpl-mpp", "mcp"]
     environment:
       XRPL_RPC_URL: ${XRPL_RPC_URL:-https://s.altnet.rippletest.net:51234}
-      XRPL_NETWORK: ${XRPL_NETWORK:-xrpl:1}
+      ALLOW_INSECURE_XRPL_RPC: ${ALLOW_INSECURE_XRPL_RPC:-false}
+      XRPL_NETWORK: ${XRPL_NETWORK:-testnet}
       XRPL_WALLET_SEED: ${XRPL_WALLET_SEED:-}
+      XRPL_MPP_MAX_FEE_DROPS: ${XRPL_MPP_MAX_FEE_DROPS:-1000}
+      XRPL_MPP_IOU_SOURCE_CURRENCY: ${XRPL_MPP_IOU_SOURCE_CURRENCY:-}
+      XRPL_MPP_IOU_MAX_SOURCE_AMOUNT: ${XRPL_MPP_IOU_MAX_SOURCE_AMOUNT:-}
+      XRPL_MPP_IOU_SLIPPAGE_BPS: ${XRPL_MPP_IOU_SLIPPAGE_BPS:-50}
       XRPL_MPP_MAX_SPEND: ${XRPL_MPP_MAX_SPEND:-0.01}
+      XRPL_MPP_EXPECTED_RECIPIENT: ${XRPL_MPP_EXPECTED_RECIPIENT:-}
+      XRPL_MPP_RECEIPTS_PATH: ${XRPL_MPP_RECEIPTS_PATH:-}
   redis:
     image: redis:7-alpine
     healthcheck:

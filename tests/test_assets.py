@@ -11,7 +11,7 @@ from xrpl_mpp_core import (
 
 
 def test_supported_asset_keys_include_builtin_mainnet_issued_assets() -> None:
-    assets = supported_asset_keys("xrpl:0", "")
+    assets = supported_asset_keys("mainnet", "")
 
     assert [(asset.code, asset.issuer) for asset in assets] == [
         ("XRP", None),
@@ -21,7 +21,7 @@ def test_supported_asset_keys_include_builtin_mainnet_issued_assets() -> None:
 
 
 def test_supported_asset_keys_include_builtin_testnet_issued_assets() -> None:
-    assets = supported_asset_keys("xrpl:1", "")
+    assets = supported_asset_keys("testnet", "")
 
     assert [(asset.code, asset.issuer) for asset in assets] == [
         ("XRP", None),
@@ -32,7 +32,7 @@ def test_supported_asset_keys_include_builtin_testnet_issued_assets() -> None:
 
 def test_supported_asset_keys_deduplicate_builtin_and_extra_assets() -> None:
     assets = supported_asset_keys(
-        "xrpl:1",
+        "testnet",
         f"USDC:{USDC_TESTNET_ISSUER},EUR:rExtraIssuer,RLUSD:{RLUSD_TESTNET_ISSUER}",
     )
 

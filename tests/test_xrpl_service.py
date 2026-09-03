@@ -1,599 +1,860 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from xrpl.core import binarycodec
+from xrpl.models.requests import Ledger, LedgerEntry, SubmitOnly, Tx
+from xrpl.models.transactions import Payment, PaymentChannelClaim, PaymentChannelCreate
+from xrpl.transaction import sign as sign_transaction
+from xrpl.wallet import Wallet
 
+from xrpl_mpp_client import XRPLPaymentSigner
 from xrpl_mpp_core import (
-    AssetKey,
-    NormalizedAmount,
     PaymentCredential,
     XRPLChargeMethodDetails,
     XRPLChargeRequest,
-    XRPLSessionMethodDetails,
-    XRPLSessionRequest,
     build_payment_challenge,
+    build_xrpl_did,
+    challenge_invoice_id,
 )
 from xrpl_mpp_facilitator.config import Settings
+from xrpl_mpp_facilitator.paychannel_service import PayChannelVerificationResult
+from xrpl_mpp_facilitator.paychannel_store import PayChannelRecord
+from xrpl_mpp_facilitator.recipient_signer import LocalSeedRecipientSigner
 from xrpl_mpp_facilitator.replay_store import ReplayReservation
-from xrpl_mpp_facilitator.session_store import SessionState
-from xrpl_mpp_facilitator.xrpl_service import ValidatedPayment, XRPLService
-
-TEST_DESTINATION = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
-DEFAULT_BEARER_TOKEN = "test-facilitator-token"
-CHALLENGE_SECRET = "test-challenge-secret"
+from xrpl_mpp_facilitator.xrpl_service import SettlementPendingError, XRPLService
 
 
-@dataclass
-class FakePaymentTx:
-    account: str
-    destination: str
-
-    def get_hash(self) -> str:
-        return "ABC123HASH"
+SECRET = "facilitator-v02-secret"
+PAYER = Wallet.create()
+RECIPIENT = Wallet.create()
+CHANNEL_ID = "A" * 64
 
 
-class FakeSessionStore:
-    def __init__(self) -> None:
-        self.events: list[str] = []
-        self.begin_open_calls: list[dict[str, object]] = []
-        self.commit_open_calls: list[dict[str, object]] = []
-        self.abort_open_calls: list[dict[str, object]] = []
-        self.consume_calls: list[dict[str, object]] = []
-        self.begin_top_up_calls: list[dict[str, object]] = []
-        self.commit_top_up_calls: list[dict[str, object]] = []
-        self.abort_top_up_calls: list[dict[str, object]] = []
-        self.close_calls: list[dict[str, object]] = []
-
-    async def begin_open_session(self, **kwargs) -> SessionState:
-        self.events.append("begin_open_session")
-        self.begin_open_calls.append(kwargs)
-        return SessionState(
-            session_id=str(kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="pending_open",
-            payer=str(kwargs["payer"]),
-            recipient=str(kwargs["recipient"]),
-            asset_identifier=str(kwargs["asset_identifier"]),
-            network=str(kwargs["network"]),
-            unit_amount=str(kwargs["unit_amount"]),
-            min_prepay_amount=str(kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=int(kwargs["idle_timeout_seconds"]),
-            prepaid_total=str(kwargs["prepaid_total"]),
-            spent_total="0",
-            available_balance=str(kwargs["prepaid_total"]),
-            last_activity_at="2026-03-21T12:00:00Z",
-            pending_action_id=str(kwargs["action_id"]),
-        )
-
-    async def commit_open_session(self, **kwargs) -> SessionState:
-        self.events.append("commit_open_session")
-        self.commit_open_calls.append(kwargs)
-        begin_kwargs = self.begin_open_calls[-1]
-        return SessionState(
-            session_id=str(begin_kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="open",
-            payer=str(begin_kwargs["payer"]),
-            recipient=str(begin_kwargs["recipient"]),
-            asset_identifier=str(begin_kwargs["asset_identifier"]),
-            network=str(begin_kwargs["network"]),
-            unit_amount=str(begin_kwargs["unit_amount"]),
-            min_prepay_amount=str(begin_kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=int(begin_kwargs["idle_timeout_seconds"]),
-            prepaid_total=str(begin_kwargs["prepaid_total"]),
-            spent_total=str(kwargs["initial_spend"]),
-            available_balance=str(
-                Decimal(str(begin_kwargs["prepaid_total"])) - Decimal(str(kwargs["initial_spend"]))
-            ),
-            last_activity_at="2026-03-21T12:00:01Z",
-        )
-
-    async def abort_open_session(self, **kwargs) -> None:
-        self.events.append("abort_open_session")
-        self.abort_open_calls.append(kwargs)
-
-    async def consume(self, **kwargs) -> SessionState:
-        self.events.append("consume")
-        self.consume_calls.append(kwargs)
-        return SessionState(
-            session_id=str(kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="open",
-            payer="rBuyer",
-            recipient=str(kwargs["recipient"]),
-            asset_identifier=str(kwargs["asset_identifier"]),
-            network=str(kwargs["network"]),
-            unit_amount=str(kwargs["unit_amount"]),
-            min_prepay_amount=str(kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=900,
-            prepaid_total="1000",
-            spent_total="500",
-            available_balance="500",
-            last_activity_at="2026-03-21T12:01:00Z",
-        )
-
-    async def begin_top_up(self, **kwargs) -> SessionState:
-        self.events.append("begin_top_up")
-        self.begin_top_up_calls.append(kwargs)
-        return SessionState(
-            session_id=str(kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="open",
-            payer="rBuyer",
-            recipient=str(kwargs["recipient"]),
-            asset_identifier=str(kwargs["asset_identifier"]),
-            network=str(kwargs["network"]),
-            unit_amount=str(kwargs["unit_amount"]),
-            min_prepay_amount=str(kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=900,
-            prepaid_total="1000",
-            spent_total="250",
-            available_balance="750",
-            last_activity_at="2026-03-21T12:02:00Z",
-            pending_action_id=str(kwargs["action_id"]),
-            pending_top_up_amount=str(kwargs["amount"]),
-        )
-
-    async def commit_top_up(self, **kwargs) -> SessionState:
-        self.events.append("commit_top_up")
-        self.commit_top_up_calls.append(kwargs)
-        begin_kwargs = self.begin_top_up_calls[-1]
-        return SessionState(
-            session_id=str(begin_kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="open",
-            payer="rBuyer",
-            recipient=str(begin_kwargs["recipient"]),
-            asset_identifier=str(begin_kwargs["asset_identifier"]),
-            network=str(begin_kwargs["network"]),
-            unit_amount=str(begin_kwargs["unit_amount"]),
-            min_prepay_amount=str(begin_kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=900,
-            prepaid_total="2000",
-            spent_total="250",
-            available_balance="1750",
-            last_activity_at="2026-03-21T12:02:00Z",
-        )
-
-    async def abort_top_up(self, **kwargs) -> None:
-        self.events.append("abort_top_up")
-        self.abort_top_up_calls.append(kwargs)
-
-    async def close_session(self, **kwargs) -> SessionState:
-        self.events.append("close_session")
-        self.close_calls.append(kwargs)
-        return SessionState(
-            session_id=str(kwargs["session_id"]),
-            session_token_hash="hashed-token",
-            status="closed",
-            payer="rBuyer",
-            recipient=str(kwargs["recipient"]),
-            asset_identifier=str(kwargs["asset_identifier"]),
-            network=str(kwargs["network"]),
-            unit_amount=str(kwargs["unit_amount"]),
-            min_prepay_amount=str(kwargs["min_prepay_amount"]),
-            idle_timeout_seconds=900,
-            prepaid_total="1000",
-            spent_total="250",
-            available_balance="750",
-            last_activity_at="2026-03-21T12:03:00Z",
-        )
+def settings(**overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "_env_file": None,
+        "MY_DESTINATION_ADDRESS": RECIPIENT.address,
+        "NETWORK_ID": "testnet",
+        "SETTLEMENT_MODE": "validated",
+        "VALIDATION_TIMEOUT": 1,
+        "FACILITATOR_BEARER_TOKEN": "facilitator-token",
+        "REDIS_URL": "redis://fake:6379/0",
+        "MPP_CHALLENGE_SECRET": SECRET,
+        "MIN_XRP_DROPS": 1,
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 class FakeReplayStore:
     def __init__(self) -> None:
-        self.mark_processed_calls: list[ReplayReservation] = []
-        self.release_pending_calls: list[ReplayReservation] = []
+        self.reservations: list[ReplayReservation] = []
+        self.processed: list[ReplayReservation] = []
+        self.released: list[ReplayReservation] = []
+        self.guarded: list[tuple[str | None, str]] = []
+
+    async def guard_available(self, invoice_id: str | None, blob_hash: str) -> None:
+        self.guarded.append((invoice_id, blob_hash))
+
+    async def reserve(
+        self,
+        invoice_id: str | None,
+        blob_hash: str,
+        *,
+        retention_seconds: int | None,
+    ) -> ReplayReservation:
+        reservation = ReplayReservation(
+            invoice_id=invoice_id,
+            blob_hash=blob_hash,
+            reservation_id=f"reservation-{len(self.reservations)}",
+            retention_seconds=retention_seconds,
+        )
+        self.reservations.append(reservation)
+        return reservation
 
     async def mark_processed(self, reservation: ReplayReservation) -> None:
-        self.mark_processed_calls.append(reservation)
+        self.processed.append(reservation)
 
     async def release_pending(self, reservation: ReplayReservation) -> None:
-        self.release_pending_calls.append(reservation)
+        self.released.append(reservation)
 
 
-def build_service(
-    *,
-    session_store: FakeSessionStore | None = None,
-    replay_store: object | None = None,
-    settlement_mode: str = "validated",
-) -> XRPLService:
-    settings = Settings(
-        _env_file=None,
-        MY_DESTINATION_ADDRESS=TEST_DESTINATION,
-        NETWORK_ID="xrpl:1",
-        SETTLEMENT_MODE=settlement_mode,
-        VALIDATION_TIMEOUT=1,
-        FACILITATOR_BEARER_TOKEN=DEFAULT_BEARER_TOKEN,
-        REDIS_URL="redis://fake:6379/0",
-        MPP_CHALLENGE_SECRET=CHALLENGE_SECRET,
+class FakeRPC:
+    def __init__(self, handler=None) -> None:
+        self.requests: list[Any] = []
+        self.handler = handler
+
+    def request(self, request: Any) -> SimpleNamespace:
+        self.requests.append(request)
+        if self.handler is not None:
+            return self.handler(request)
+        if isinstance(request, SubmitOnly):
+            return SimpleNamespace(result={"engine_result": "tesSUCCESS"})
+        if isinstance(request, Tx):
+            return SimpleNamespace(
+                result={
+                    "validated": True,
+                    "meta": {
+                        "TransactionResult": "tesSUCCESS",
+                        "delivered_amount": "1000",
+                    },
+                }
+            )
+        if isinstance(request, Ledger):
+            return SimpleNamespace(result={"ledger_index": 1000})
+        raise AssertionError(f"unexpected request: {request!r}")
+
+
+def signer() -> XRPLPaymentSigner:
+    return XRPLPaymentSigner(
+        PAYER,
+        network="testnet",
+        autofill_enabled=False,
+        default_fee="12",
+        default_sequence=1,
+        default_last_ledger_sequence=1010,
     )
-    return XRPLService(
-        settings,
-        replay_store=replay_store or object(),
-        session_store=session_store or FakeSessionStore(),
-    )
 
 
-def build_charge_credential() -> PaymentCredential:
-    challenge = build_payment_challenge(
-        secret=CHALLENGE_SECRET,
+def charge_challenge(*, amount: str = "1000"):
+    return build_payment_challenge(
+        secret=SECRET,
         realm="merchant.example",
         method="xrpl",
         intent="charge",
         request_model=XRPLChargeRequest(
-            amount="1000",
-            currency="XRP:native",
-            recipient=TEST_DESTINATION,
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            amount=amount,
+            currency="XRP",
+            recipient=RECIPIENT.address,
+            methodDetails=XRPLChargeMethodDetails(network="testnet"),
         ),
         expires_in_seconds=300,
     )
-    return PaymentCredential(
-        challenge=challenge,
-        payload={"signedTxBlob": "DEADBEEF"},
-    )
 
 
-def build_session_credential(*, action: str, idle_timeout_seconds: int | None = None) -> PaymentCredential:
-    challenge = build_payment_challenge(
-        secret=CHALLENGE_SECRET,
-        realm="merchant.example",
-        method="xrpl",
-        intent="session",
-        request_model=XRPLSessionRequest(
-            amount="250",
-            currency="XRP:native",
-            recipient=TEST_DESTINATION,
-            methodDetails=XRPLSessionMethodDetails(
-                network="xrpl:1",
-                sessionId="A" * 64,
-                asset="XRP:native",
-                unitAmount="250",
-                minPrepayAmount="1000",
-                idleTimeoutSeconds=idle_timeout_seconds,
-            ),
-        ),
-        expires_in_seconds=300,
-    )
-    payload: dict[str, str] = {"action": action, "sessionToken": "session-token"}
-    if action in {"open", "top_up"}:
-        payload["signedTxBlob"] = "DEADBEEF"
-    return PaymentCredential(challenge=challenge, payload=payload)
-
-
-def validated_payment(
-    *,
-    amount_value: Decimal,
-    drops: int | None = None,
-    invoice_id: str = "A" * 64,
-    replay_reservation: ReplayReservation | None = None,
-) -> ValidatedPayment:
-    return ValidatedPayment(
-        signed_tx_blob="DEADBEEF",
-        tx=FakePaymentTx(account="rBuyer", destination=TEST_DESTINATION),
-        invoice_id=invoice_id,
-        blob_hash="blob-hash",
-        amount=NormalizedAmount(
-            asset=AssetKey(code="XRP", issuer=None),
-            value=amount_value,
-            drops=drops,
-        ),
-        replay_reservation=replay_reservation,
-    )
-
-
-def test_supported_methods_advertise_charge_and_session() -> None:
-    service = build_service()
-
-    methods = service.supported_methods()
-
-    assert len(methods) == 1
-    assert methods[0].method == "xrpl"
-    assert methods[0].intents == ["charge", "session"]
-    assert methods[0].network == "xrpl:1"
-
-
-def test_ensure_signing_address_authorized_accepts_regular_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = build_service()
-
-    async def _client_request(_request) -> SimpleNamespace:
-        return SimpleNamespace(
-            result={
-                "account_data": {
-                    "RegularKey": "rRegularSigner",
-                    "account_flags": {"disableMasterKey": True},
-                }
-            }
-        )
-
-    monkeypatch.setattr(service, "_client_request", _client_request)
-
-    asyncio.run(
-        service._ensure_signing_address_authorized(
-            account="rBuyer",
-            signing_address="rRegularSigner",
-        )
-    )
-
-
-def test_ensure_signing_address_authorized_rejects_disabled_master_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = build_service()
-
-    async def _client_request(_request) -> SimpleNamespace:
-        return SimpleNamespace(
-            result={
-                "account_data": {
-                    "account_flags": {"disableMasterKey": True},
-                }
-            }
-        )
-
-    monkeypatch.setattr(service, "_client_request", _client_request)
-
-    with pytest.raises(ValueError, match="not authorized"):
-        asyncio.run(
-            service._ensure_signing_address_authorized(
-                account="rBuyer",
-                signing_address="rBuyer",
-            )
-        )
-
-
-def test_finalize_submission_accepts_queued_result_in_validated_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    replay_store = FakeReplayStore()
-    service = build_service(replay_store=replay_store)
-    reservation = ReplayReservation(
-        invoice_id="A" * 64,
-        blob_hash="blob-hash",
-        reservation_id="reservation-1",
-    )
-
-    async def _client_request(_request) -> SimpleNamespace:
-        return SimpleNamespace(
-            result={
-                "validated": True,
-                "meta": {"delivered_amount": "1000"},
-            }
-        )
-
-    monkeypatch.setattr(service, "_client_request", _client_request)
-
-    tx_hash, settlement_status = asyncio.run(
-        service._finalize_submission(
-            validated_payment(
-                amount_value=Decimal("1000"),
-                drops=1000,
-                replay_reservation=reservation,
-            ),
-            SimpleNamespace(
-                status="success",
-                result={"engine_result": "terQUEUED", "queued": True},
-            ),
-        )
-    )
-
-    assert (tx_hash, settlement_status) == ("ABC123HASH", "validated")
-    assert replay_store.mark_processed_calls == [reservation]
-
-
-def test_finalize_submission_accepts_queued_result_in_optimistic_mode() -> None:
-    replay_store = FakeReplayStore()
-    service = build_service(
-        replay_store=replay_store,
-        settlement_mode="optimistic",
-    )
-    reservation = ReplayReservation(
-        invoice_id="A" * 64,
-        blob_hash="blob-hash",
-        reservation_id="reservation-1",
-    )
-
-    tx_hash, settlement_status = asyncio.run(
-        service._finalize_submission(
-            validated_payment(
-                amount_value=Decimal("1000"),
-                drops=1000,
-                replay_reservation=reservation,
-            ),
-            SimpleNamespace(
-                status="success",
-                result={"engine_result": "terQUEUED", "queued": True},
-            ),
-        )
-    )
-
-    assert (tx_hash, settlement_status) == ("ABC123HASH", "submitted")
-    assert replay_store.mark_processed_calls == [reservation]
-
-
-def test_charge_builds_receipt_from_validated_payment(monkeypatch: pytest.MonkeyPatch) -> None:
-    service = build_service()
-    credential = build_charge_credential()
-
-    async def _validate_payment(*_args, **_kwargs) -> ValidatedPayment:
-        return validated_payment(amount_value=Decimal("1000"), drops=1000)
-
-    async def _settle_validated_payment(_payment: ValidatedPayment) -> tuple[str, str]:
-        return "ABC123HASH", "validated"
-
-    monkeypatch.setattr(service, "_validate_payment", _validate_payment)
-    monkeypatch.setattr(service, "_settle_validated_payment", _settle_validated_payment)
+def test_pull_charge_validates_binding_transaction_terms_source_and_replay() -> None:
+    replay = FakeReplayStore()
+    rpc = FakeRPC()
+    service = XRPLService(settings(), replay_store=replay, client=rpc)
+    credential = signer().build_charge_credential(charge_challenge())
 
     receipt = asyncio.run(service.charge(credential))
 
-    assert receipt.intent == "charge"
-    assert receipt.payer == "rBuyer"
-    assert receipt.recipient == TEST_DESTINATION
-    assert receipt.invoice_id == "A" * 64
-    assert receipt.tx_hash == "ABC123HASH"
+    assert receipt.status == "success"
+    assert receipt.method == "xrpl"
+    assert receipt.network == "testnet"
+    assert receipt.payer == PAYER.address
+    assert receipt.recipient == RECIPIENT.address
+    assert receipt.invoice_id == challenge_invoice_id(credential.challenge.id)
+    assert receipt.tx_hash == receipt.reference
     assert receipt.settlement_status == "validated"
+    assert len(replay.reservations) == 1
+    assert replay.processed == replay.reservations
+    assert any(isinstance(request, SubmitOnly) for request in rpc.requests)
 
 
-def test_session_open_records_initial_spend_and_returns_session_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="open", idle_timeout_seconds=60)
+def test_charge_rejects_transaction_amount_not_bound_to_challenge() -> None:
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(),
+    )
+    challenge = charge_challenge(amount="2000")
+    invoice_id = challenge_invoice_id(challenge.id)
+    blob = signer().sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "transaction", "blob": blob},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
 
-    async def _validate_payment(*_args, **_kwargs) -> ValidatedPayment:
-        return validated_payment(amount_value=Decimal("1000"), drops=1000)
-
-    async def _settle_validated_payment(_payment: ValidatedPayment) -> tuple[str, str]:
-        session_store.events.append("settle")
-        return "ABC123HASH", "validated"
-
-    monkeypatch.setattr(service, "_validate_payment", _validate_payment)
-    monkeypatch.setattr(service, "_settle_validated_payment", _settle_validated_payment)
-
-    receipt = asyncio.run(service.session(credential))
-
-    assert session_store.events == ["begin_open_session", "settle", "commit_open_session"]
-    assert session_store.begin_open_calls[0]["prepaid_total"] == Decimal("1000")
-    assert session_store.begin_open_calls[0]["initial_spend"] == Decimal("250")
-    assert session_store.begin_open_calls[0]["idle_timeout_seconds"] == 60
-    assert receipt.intent == "session"
-    assert receipt.session_id == "A" * 64
-    assert receipt.session_token is not None
-    assert receipt.last_action == "open"
-    assert receipt.tx_hash == "ABC123HASH"
+    with pytest.raises(ValueError, match="amount or currency"):
+        asyncio.run(service.charge(credential))
 
 
-def test_session_use_consumes_balance() -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="use")
+def test_pull_charge_rejects_blob_without_last_ledger_sequence() -> None:
+    challenge = charge_challenge()
+    invoice_id = challenge_invoice_id(challenge.id)
+    unbounded_signer = XRPLPaymentSigner(
+        PAYER,
+        network="testnet",
+        autofill_enabled=False,
+        default_fee="12",
+        default_sequence=1,
+    )
+    blob = unbounded_signer.sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "transaction", "blob": blob},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
+    rpc = FakeRPC()
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=rpc,
+    )
 
-    receipt = asyncio.run(service.session(credential))
-
-    assert session_store.consume_calls[0]["recipient"] == TEST_DESTINATION
-    assert session_store.consume_calls[0]["asset_identifier"] == "XRP:native"
-    assert session_store.consume_calls[0]["network"] == "xrpl:1"
-    assert session_store.consume_calls[0]["unit_amount"] == "250"
-    assert session_store.consume_calls[0]["min_prepay_amount"] == "1000"
-    assert session_store.consume_calls[0]["amount"] == Decimal("250")
-    assert receipt.intent == "session"
-    assert receipt.last_action == "use"
-    assert receipt.available_balance == "500"
+    with pytest.raises(ValueError, match="requires LastLedgerSequence"):
+        asyncio.run(service.charge(credential))
+    assert not any(isinstance(request, SubmitOnly) for request in rpc.requests)
 
 
-def test_session_top_up_records_pending_state_before_settlement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="top_up")
-    captured: dict[str, object] = {}
+def test_charge_rejects_tampered_challenge_before_submission() -> None:
+    rpc = FakeRPC()
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=rpc,
+    )
+    credential = signer().build_charge_credential(charge_challenge())
+    tampered = credential.model_copy(
+        update={
+            "challenge": credential.challenge.model_copy(
+                update={"realm": "attacker.example"}
+            )
+        }
+    )
 
-    async def _validate_payment(
-        signed_tx_blob: str,
-        provided_invoice_id: str | None,
-        replay_mode: str,
-        replay_scope: str = "invoice_and_blob",
-    ) -> ValidatedPayment:
-        captured.update(
-            signed_tx_blob=signed_tx_blob,
-            provided_invoice_id=provided_invoice_id,
-            replay_mode=replay_mode,
-            replay_scope=replay_scope,
+    with pytest.raises(ValueError, match="binding invalid"):
+        asyncio.run(service.charge(tampered))
+    assert rpc.requests == []
+
+
+def test_push_charge_polls_until_validated_and_checks_delivered_amount(monkeypatch) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.asyncio.sleep",
+        no_sleep,
+    )
+    challenge = charge_challenge()
+    invoice_id = challenge_invoice_id(challenge.id)
+    blob = signer().sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    raw = binarycodec.decode(blob)
+    tx_hash = Payment.from_xrpl(raw).get_hash().upper()
+
+    tx_calls = 0
+
+    def handler(request: Any) -> SimpleNamespace:
+        nonlocal tx_calls
+        if not isinstance(request, Tx):
+            return SimpleNamespace(result={"ledger_index": 1001})
+        tx_calls += 1
+        if tx_calls == 1:
+            return SimpleNamespace(result={"error": "txnNotFound"})
+        return SimpleNamespace(
+            result={
+                "validated": True,
+                "ledger_index": 1000,
+                "tx_json": {**raw, "hash": tx_hash},
+                "meta": {
+                    "TransactionResult": "tesSUCCESS",
+                    "delivered_amount": "1000",
+                },
+            }
         )
-        return validated_payment(amount_value=Decimal("1000"), drops=1000)
 
-    async def _settle_validated_payment(_payment: ValidatedPayment) -> tuple[str, str]:
-        session_store.events.append("settle")
-        return "ABC123HASH", "validated"
+    replay = FakeReplayStore()
+    service = XRPLService(
+        settings(SETTLEMENT_MODE="validated", VALIDATION_TIMEOUT=2),
+        replay_store=replay,
+        client=FakeRPC(handler),
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "hash", "hash": tx_hash},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
 
-    monkeypatch.setattr(service, "_validate_payment", _validate_payment)
-    monkeypatch.setattr(service, "_settle_validated_payment", _settle_validated_payment)
+    receipt = asyncio.run(service.charge(credential))
+
+    assert receipt.reference == tx_hash
+    assert receipt.settlement_status == "validated"
+    assert replay.processed == replay.reservations
+    assert tx_calls == 2
+
+
+def test_push_charge_rejects_node_payload_whose_hash_does_not_match_credential() -> None:
+    challenge = charge_challenge()
+    invoice_id = challenge_invoice_id(challenge.id)
+    blob = signer().sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    raw = binarycodec.decode(blob)
+    presented_hash = "E" * 64
+
+    def handler(request: Any) -> SimpleNamespace:
+        assert isinstance(request, Tx)
+        return SimpleNamespace(
+            result={
+                "validated": True,
+                "ledger_index": 1000,
+                "tx_json": {**raw, "hash": presented_hash},
+                "meta": {
+                    "TransactionResult": "tesSUCCESS",
+                    "delivered_amount": "1000",
+                },
+            }
+        )
+
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(handler),
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "hash", "hash": presented_hash},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
+
+    with pytest.raises(ValueError, match="hash does not match"):
+        asyncio.run(service.charge(credential))
+
+
+def test_push_charge_rejects_transaction_that_predates_challenge_window() -> None:
+    challenge = charge_challenge()
+    invoice_id = challenge_invoice_id(challenge.id)
+    blob = signer().sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    raw = binarycodec.decode(blob)
+    tx_hash = Payment.from_xrpl(raw).get_hash().upper()
+
+    def handler(request: Any) -> SimpleNamespace:
+        if isinstance(request, Tx):
+            return SimpleNamespace(
+                result={
+                    "validated": True,
+                    "ledger_index": 900,
+                    "tx_json": {**raw, "hash": tx_hash},
+                    "meta": {
+                        "TransactionResult": "tesSUCCESS",
+                        "delivered_amount": "1000",
+                    },
+                }
+            )
+        return SimpleNamespace(result={"ledger_index": 1001})
+
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(handler),
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "hash", "hash": tx_hash},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
+
+    with pytest.raises(ValueError, match="predates the challenge"):
+        asyncio.run(service.charge(credential))
+
+
+def test_push_charge_validation_timeout_preserves_payment_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.asyncio.sleep",
+        no_sleep,
+    )
+    challenge = charge_challenge()
+    invoice_id = challenge_invoice_id(challenge.id)
+    blob = signer().sign_payment(
+        pay_to=RECIPIENT.address,
+        currency="XRP",
+        amount="1000",
+        invoice_id=invoice_id,
+    )
+    raw = binarycodec.decode(blob)
+    tx_hash = Payment.from_xrpl(raw).get_hash().upper()
+    replay = FakeReplayStore()
+
+    def handler(request: Any) -> SimpleNamespace:
+        assert isinstance(request, Tx)
+        return SimpleNamespace(result={"error": "txnNotFound"})
+
+    service = XRPLService(
+        settings(VALIDATION_TIMEOUT=1),
+        replay_store=replay,
+        client=FakeRPC(handler),
+    )
+    credential = PaymentCredential(
+        challenge=challenge,
+        payload={"type": "hash", "hash": tx_hash},
+        source=build_xrpl_did(network="testnet", address=PAYER.address),
+    )
+
+    with pytest.raises(SettlementPendingError) as pending:
+        asyncio.run(service.charge(credential))
+
+    assert pending.value.tx_hash == tx_hash
+    assert replay.reservations == []
+
+
+def test_ambiguous_pull_submission_keeps_replay_reservation_pending(monkeypatch) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.asyncio.sleep",
+        no_sleep,
+    )
+
+    def handler(request: Any) -> SimpleNamespace:
+        if isinstance(request, Ledger):
+            return SimpleNamespace(result={"ledger_index": 1000})
+        if isinstance(request, SubmitOnly):
+            return SimpleNamespace(result={"engine_result": "tesSUCCESS"})
+        assert isinstance(request, Tx)
+        return SimpleNamespace(result={"error": "txnNotFound"})
+
+    replay = FakeReplayStore()
+    service = XRPLService(
+        settings(VALIDATION_TIMEOUT=1),
+        replay_store=replay,
+        client=FakeRPC(handler),
+    )
+
+    with pytest.raises(SettlementPendingError):
+        asyncio.run(service.charge(signer().build_charge_credential(charge_challenge())))
+
+    assert len(replay.reservations) == 1
+    assert replay.processed == []
+    assert replay.released == []
+
+
+def test_definitive_pull_submission_rejection_releases_replay_reservation() -> None:
+    def handler(request: Any) -> SimpleNamespace:
+        if isinstance(request, Ledger):
+            return SimpleNamespace(result={"ledger_index": 1000})
+        assert isinstance(request, SubmitOnly)
+        return SimpleNamespace(
+            result={
+                "engine_result": "temMALFORMED",
+                "engine_result_message": "Malformed transaction",
+            }
+        )
+
+    replay = FakeReplayStore()
+    service = XRPLService(
+        settings(),
+        replay_store=replay,
+        client=FakeRPC(handler),
+    )
+
+    with pytest.raises(ValueError, match="submission rejected"):
+        asyncio.run(service.charge(signer().build_charge_credential(charge_challenge())))
+
+    assert replay.released == replay.reservations
+
+
+def test_supported_method_uses_named_network_and_canonical_currencies() -> None:
+    mpt_id = "AB" * 32
+    service = XRPLService(
+        settings(
+            ALLOWED_ISSUED_ASSETS=(
+                "EUR:rPEPPER7kfTD9w2To4CQk6UCfuHM9c6GDY"
+            ),
+            ALLOWED_MPT_ISSUANCE_IDS=mpt_id,
+        ),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(),
+    )
+
+    method = service.supported_methods()[0]
+    assert method.network == "testnet"
+    assert method.intents == ["charge"]
+    assert method.currencies[0] == "XRP"
+    assert any('"currency":"EUR"' in currency for currency in method.currencies)
+    assert f'{{"mpt_issuance_id":"{mpt_id}"}}' in method.currencies
+
+
+def test_configured_paychannel_is_wired_to_redis_and_advertised() -> None:
+    service = XRPLService(
+        settings(PAYCHANNEL_PAYER_PUBLIC_KEY=PAYER.public_key),
+        replay_store=FakeReplayStore(),
+        redis_client=object(),
+        client=FakeRPC(),
+    )
+
+    assert service.supported_methods()[0].intents == ["charge", "session"]
+
+
+def test_background_redemption_requires_recipient_signer() -> None:
+    with pytest.raises(ValueError, match="requires a recipient signer"):
+        XRPLService(
+            settings(
+                PAYCHANNEL_PAYER_PUBLIC_KEY=PAYER.public_key,
+                PAYCHANNEL_REDEEM_INTERVAL_SECONDS=5,
+            ),
+            replay_store=FakeReplayStore(),
+            redis_client=object(),
+            client=FakeRPC(),
+        )
+
+
+class FakeRecipientSigner:
+    def __init__(self, *, set_tf_close: bool = False) -> None:
+        self.account = RECIPIENT.address
+        self.set_tf_close = set_tf_close
+        self.calls: list[PaymentChannelClaim] = []
+
+    async def sign_claim(
+        self,
+        transaction: PaymentChannelClaim,
+    ) -> PaymentChannelClaim:
+        self.calls.append(transaction)
+        if self.set_tf_close:
+            transaction = PaymentChannelClaim.from_xrpl(
+                {**transaction.to_xrpl(), "Flags": 0x00010000}
+            )
+        return sign_transaction(transaction, RECIPIENT)
+
+
+def test_injected_recipient_signer_redeems_without_tf_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer_backend = FakeRecipientSigner()
+    submitted: list[PaymentChannelClaim] = []
+
+    def fake_autofill(transaction: PaymentChannelClaim, _client: Any) -> PaymentChannelClaim:
+        return PaymentChannelClaim.from_xrpl(
+            {
+                **transaction.to_xrpl(),
+                "Fee": "12",
+                "Sequence": 1,
+                "LastLedgerSequence": 1010,
+            }
+        )
+
+    def fake_submit_and_wait(
+        transaction: PaymentChannelClaim,
+        _client: Any,
+        *,
+        autofill: bool,
+    ) -> SimpleNamespace:
+        assert autofill is False
+        submitted.append(transaction)
+        return SimpleNamespace(
+            result={
+                "validated": True,
+                "hash": transaction.get_hash().upper(),
+                "meta": {"TransactionResult": "tesSUCCESS"},
+            }
+        )
+
+    monkeypatch.setattr("xrpl_mpp_facilitator.xrpl_service.autofill", fake_autofill)
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.submit_and_wait",
+        fake_submit_and_wait,
+    )
+    service = XRPLService(
+        settings(PAYCHANNEL_PAYER_PUBLIC_KEY=PAYER.public_key),
+        replay_store=FakeReplayStore(),
+        paychannel_service=object(),  # type: ignore[arg-type]
+        client=FakeRPC(),
+        recipient_signer=signer_backend,
+    )
+    record = PayChannelRecord(
+        network="testnet",
+        channel_id=CHANNEL_ID,
+        payer=PAYER.address,
+        recipient=RECIPIENT.address,
+        funded="1000",
+        cumulative="250",
+        signature="AA",
+        created_at=1,
+        updated_at=1,
+    )
+
+    tx_hash = asyncio.run(service._settle_paychannel_claim(record=record))
+
+    assert len(signer_backend.calls) == 1
+    assert len(submitted) == 1
+    assert submitted[0].to_xrpl()["Flags"] == 0
+    assert not (submitted[0].to_xrpl()["Flags"] & 0x00010000)
+    assert tx_hash == submitted[0].get_hash().upper()
+
+
+def test_recipient_signer_cannot_add_tf_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer_backend = FakeRecipientSigner(set_tf_close=True)
+
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.autofill",
+        lambda transaction, _client: PaymentChannelClaim.from_xrpl(
+            {
+                **transaction.to_xrpl(),
+                "Fee": "12",
+                "Sequence": 1,
+                "LastLedgerSequence": 1010,
+            }
+        ),
+    )
+    service = XRPLService(
+        settings(PAYCHANNEL_PAYER_PUBLIC_KEY=PAYER.public_key),
+        replay_store=FakeReplayStore(),
+        paychannel_service=object(),  # type: ignore[arg-type]
+        client=FakeRPC(),
+        recipient_signer=signer_backend,
+    )
+    record = PayChannelRecord(
+        network="testnet",
+        channel_id=CHANNEL_ID,
+        payer=PAYER.address,
+        recipient=RECIPIENT.address,
+        funded="1000",
+        cumulative="250",
+        signature="AA",
+        created_at=1,
+        updated_at=1,
+    )
+
+    with pytest.raises(ValueError, match="changed the prepared"):
+        asyncio.run(service._settle_paychannel_claim(record=record))
+
+
+def test_local_seed_recipient_signer_is_the_config_adapter() -> None:
+    adapter = LocalSeedRecipientSigner(RECIPIENT.seed)
+    transaction = PaymentChannelClaim(
+        account=RECIPIENT.address,
+        channel=CHANNEL_ID,
+        balance="250",
+        amount="250",
+        signature="AA",
+        public_key=PAYER.public_key,
+        flags=0,
+        fee="12",
+        sequence=1,
+        last_ledger_sequence=1010,
+    )
+
+    signed = asyncio.run(adapter.sign_claim(transaction))
+
+    assert adapter.account == RECIPIENT.address
+    assert signed.is_signed()
+    assert signed.to_xrpl()["Flags"] == 0
+
+
+def test_validated_paychannel_ledger_check_binds_parties_key_and_funding() -> None:
+    def handler(request: Any) -> SimpleNamespace:
+        assert isinstance(request, LedgerEntry)
+        return SimpleNamespace(
+            result={
+                "node": {
+                    "Account": PAYER.address,
+                    "Destination": RECIPIENT.address,
+                    "PublicKey": PAYER.public_key,
+                    "Amount": "1000",
+                    "Balance": "0",
+                    "SettleDelay": 3600,
+                }
+            }
+        )
+
+    service = XRPLService(
+        settings(PAYCHANNEL_PAYER_PUBLIC_KEY=PAYER.public_key),
+        replay_store=FakeReplayStore(),
+        paychannel_service=object(),  # type: ignore[arg-type]
+        client=FakeRPC(handler),
+    )
+    record = PayChannelRecord(
+        network="testnet",
+        channel_id=CHANNEL_ID,
+        payer=PAYER.address,
+        recipient=RECIPIENT.address,
+        funded="1000",
+        created_at=1,
+        updated_at=1,
+    )
+
+    asyncio.run(service._verify_channel_ledger(record=record, cumulative="500"))
+
+
+def test_open_submission_waits_for_validation_and_extracts_channel_id() -> None:
+    blob = signer().sign_channel_create(
+        destination=RECIPIENT.address,
+        funding_amount="1000",
+        settle_delay=3600,
+    )
+
+    def handler(request: Any) -> SimpleNamespace:
+        if isinstance(request, SubmitOnly):
+            return SimpleNamespace(result={"engine_result": "tesSUCCESS"})
+        assert isinstance(request, Tx)
+        return SimpleNamespace(
+            result={
+                "validated": True,
+                "meta": {
+                    "TransactionResult": "tesSUCCESS",
+                    "AffectedNodes": [
+                        {
+                            "CreatedNode": {
+                                "LedgerEntryType": "PayChannel",
+                                "LedgerIndex": CHANNEL_ID,
+                            }
+                        }
+                    ],
+                },
+            }
+        )
+
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(handler),
+    )
+    result = asyncio.run(
+        service._submit_open_channel(
+            transaction_blob=blob,
+            transaction=binarycodec.decode(blob),
+        )
+    )
+
+    assert result.channel_id == CHANNEL_ID
+    assert len(result.tx_hash) == 64
+
+
+def test_open_submission_connection_loss_preserves_transaction_reference() -> None:
+    blob = signer().sign_channel_create(
+        destination=RECIPIENT.address,
+        funding_amount="1000",
+        settle_delay=3600,
+    )
+    transaction = binarycodec.decode(blob)
+    tx_hash = PaymentChannelCreate.from_xrpl(transaction).get_hash().upper()
+
+    def handler(request: Any) -> SimpleNamespace:
+        assert isinstance(request, SubmitOnly)
+        raise OSError("connection lost after submission")
+
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(handler),
+    )
+
+    with pytest.raises(SettlementPendingError) as pending:
+        asyncio.run(
+            service._submit_open_channel(
+                transaction_blob=blob,
+                transaction=transaction,
+            )
+        )
+
+    assert pending.value.tx_hash == tx_hash
+
+
+def test_open_submission_validation_timeout_preserves_transaction_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "xrpl_mpp_facilitator.xrpl_service.asyncio.sleep",
+        no_sleep,
+    )
+    blob = signer().sign_channel_create(
+        destination=RECIPIENT.address,
+        funding_amount="1000",
+        settle_delay=3600,
+    )
+    transaction = binarycodec.decode(blob)
+    tx_hash = PaymentChannelCreate.from_xrpl(transaction).get_hash().upper()
+
+    def handler(request: Any) -> SimpleNamespace:
+        if isinstance(request, SubmitOnly):
+            return SimpleNamespace(result={"engine_result": "tesSUCCESS"})
+        assert isinstance(request, Tx)
+        return SimpleNamespace(result={"error": "txnNotFound"})
+
+    service = XRPLService(
+        settings(VALIDATION_TIMEOUT=1),
+        replay_store=FakeReplayStore(),
+        client=FakeRPC(handler),
+    )
+
+    with pytest.raises(SettlementPendingError) as pending:
+        asyncio.run(
+            service._submit_open_channel(
+                transaction_blob=blob,
+                transaction=transaction,
+            )
+        )
+
+    assert pending.value.tx_hash == tx_hash
+
+
+class FakePayChannelService:
+    async def verify(self, credential: PaymentCredential) -> PayChannelVerificationResult:
+        return PayChannelVerificationResult(
+            action="voucher",
+            challengeId=credential.challenge.id,
+            network="testnet",
+            payer=PAYER.address,
+            recipient=RECIPIENT.address,
+            channelId=CHANNEL_ID,
+            cumulative="250",
+            previous="0",
+            reference=f"{CHANNEL_ID}:250",
+        )
+
+
+def test_session_delegates_to_paychannel_and_returns_receipt_extensions() -> None:
+    service = XRPLService(
+        settings(),
+        replay_store=FakeReplayStore(),
+        paychannel_service=FakePayChannelService(),  # type: ignore[arg-type]
+        client=FakeRPC(),
+    )
+    challenge = build_payment_challenge(
+        secret=SECRET,
+        realm="merchant.example",
+        method="xrpl",
+        intent="session",
+        request_model=XRPLChargeRequest(
+            amount="250",
+            currency="XRP",
+            recipient=RECIPIENT.address,
+        ),
+    )
+    credential = PaymentCredential(challenge=challenge, payload={})
 
     receipt = asyncio.run(service.session(credential))
 
-    assert session_store.events == ["begin_top_up", "settle", "commit_top_up"]
-    assert session_store.begin_top_up_calls[0]["recipient"] == TEST_DESTINATION
-    assert session_store.begin_top_up_calls[0]["asset_identifier"] == "XRP:native"
-    assert session_store.begin_top_up_calls[0]["unit_amount"] == "250"
-    assert session_store.begin_top_up_calls[0]["min_prepay_amount"] == "1000"
-    assert session_store.begin_top_up_calls[0]["amount"] == Decimal("1000")
-    assert captured == {
-        "signed_tx_blob": "DEADBEEF",
-        "provided_invoice_id": "A" * 64,
-        "replay_mode": "settle",
-        "replay_scope": "blob_only",
-    }
-    assert receipt.last_action == "top_up"
-    assert receipt.tx_hash == "ABC123HASH"
-
-
-def test_session_open_aborts_pending_state_when_settlement_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="open")
-
-    async def _validate_payment(*_args, **_kwargs) -> ValidatedPayment:
-        return validated_payment(amount_value=Decimal("1000"), drops=1000)
-
-    async def _settle_validated_payment(_payment: ValidatedPayment) -> tuple[str, str]:
-        session_store.events.append("settle")
-        raise ValueError("XRPL unavailable")
-
-    monkeypatch.setattr(service, "_validate_payment", _validate_payment)
-    monkeypatch.setattr(service, "_settle_validated_payment", _settle_validated_payment)
-
-    with pytest.raises(ValueError, match="XRPL unavailable"):
-        asyncio.run(service.session(credential))
-
-    assert session_store.events == ["begin_open_session", "settle", "abort_open_session"]
-    assert session_store.abort_open_calls[0]["session_id"] == "A" * 64
-
-
-def test_session_top_up_aborts_pending_state_when_settlement_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="top_up")
-
-    async def _validate_payment(*_args, **_kwargs) -> ValidatedPayment:
-        return validated_payment(amount_value=Decimal("1000"), drops=1000)
-
-    async def _settle_validated_payment(_payment: ValidatedPayment) -> tuple[str, str]:
-        session_store.events.append("settle")
-        raise ValueError("XRPL unavailable")
-
-    monkeypatch.setattr(service, "_validate_payment", _validate_payment)
-    monkeypatch.setattr(service, "_settle_validated_payment", _settle_validated_payment)
-
-    with pytest.raises(ValueError, match="XRPL unavailable"):
-        asyncio.run(service.session(credential))
-
-    assert session_store.events == ["begin_top_up", "settle", "abort_top_up"]
-    assert session_store.abort_top_up_calls[0]["session_id"] == "A" * 64
-
-
-def test_session_close_returns_closed_receipt() -> None:
-    session_store = FakeSessionStore()
-    service = build_service(session_store=session_store)
-    credential = build_session_credential(action="close")
-
-    receipt = asyncio.run(service.session(credential))
-
-    assert session_store.close_calls[0]["session_id"] == "A" * 64
-    assert session_store.close_calls[0]["unit_amount"] == "250"
-    assert session_store.close_calls[0]["min_prepay_amount"] == "1000"
-    assert receipt.intent == "session"
-    assert receipt.last_action == "close"
-    assert receipt.settlement_status == "session_closed"
-    assert receipt.session_token is None
+    assert receipt.channel_id == CHANNEL_ID
+    assert receipt.cumulative == "250"
+    assert receipt.action == "voucher"

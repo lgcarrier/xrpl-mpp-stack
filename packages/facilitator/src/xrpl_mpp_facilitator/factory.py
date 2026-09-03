@@ -22,7 +22,7 @@ from xrpl_mpp_facilitator.gateway_auth import (
 from xrpl_mpp_facilitator.models import ChargeRequest, ProblemDetails, Receipt, SessionRequest, SupportedResponse
 from xrpl_mpp_facilitator.redis_utils import create_async_redis_client
 from xrpl_mpp_facilitator._version import __version__
-from xrpl_mpp_facilitator.xrpl_service import XRPLService
+from xrpl_mpp_facilitator.xrpl_service import SettlementPendingError, XRPLService
 
 PAYMENT_ENDPOINT_PATHS: Final[frozenset[str]] = frozenset({"/charge", "/session"})
 AUTHENTICATION_ERROR_DETAIL: Final[str] = "Invalid authentication credentials"
@@ -156,14 +156,18 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            start_service = getattr(active_xrpl_service, "start", None)
+            if start_service is not None:
+                await start_service()
             yield
         finally:
+            await active_xrpl_service.aclose()
             if redis_client is not None:
                 await redis_client.aclose()
 
     app = FastAPI(
         title="XRPL MPP Facilitator",
-        description="Self-hosted facilitator for XRPL-backed MPP charge and session intents.",
+        description="Self-hosted facilitator for XRPL MPP 0.2 charge and PayChannel session intents.",
         version=__version__,
         docs_url="/docs" if active_settings.ENABLE_API_DOCS else None,
         redoc_url="/redoc" if active_settings.ENABLE_API_DOCS else None,
@@ -228,6 +232,29 @@ def create_app(
         return JSONResponse(
             status_code=402,
             content=problem.model_dump(by_alias=True, exclude_none=True),
+            media_type="application/problem+json",
+        )
+
+    def _settlement_pending_problem(
+        error: SettlementPendingError,
+        challenge_id: str,
+    ) -> JSONResponse:
+        problem = ProblemDetails(
+            type="https://paymentauth.org/problems/settlement-pending",
+            title="Payment settlement pending",
+            status=503,
+            detail=str(error),
+            challengeId=challenge_id,
+            paymentReference=error.tx_hash,
+        )
+        return JSONResponse(
+            status_code=503,
+            content=problem.model_dump(by_alias=True, exclude_none=True),
+            media_type="application/problem+json",
+            headers={
+                "Retry-After": "4",
+                "Cache-Control": "private, no-store",
+            },
         )
 
     @app.get("/health")
@@ -244,9 +271,16 @@ def create_app(
         _require_authenticated_gateway(request)
         try:
             return await active_xrpl_service.charge(body.credential)
+        except SettlementPendingError as exc:
+            logger.warning(
+                "charge_settlement_pending",
+                tx_hash=exc.tx_hash,
+                challenge_id=body.credential.challenge.id,
+            )
+            return _settlement_pending_problem(exc, body.credential.challenge.id)  # type: ignore[return-value]
         except ValueError as exc:
             logger.warning("charge_failed", error=str(exc))
-            raise HTTPException(status_code=402, detail=str(exc)) from exc
+            return _payment_problem(str(exc), body.credential.challenge.id)  # type: ignore[return-value]
 
     @app.post("/session", response_model=Receipt)
     @limiter.limit("60/minute", key_func=_payment_rate_limit_key)
@@ -254,8 +288,15 @@ def create_app(
         _require_authenticated_gateway(request)
         try:
             return await active_xrpl_service.session(body.credential)
+        except SettlementPendingError as exc:
+            logger.warning(
+                "session_settlement_pending",
+                tx_hash=exc.tx_hash,
+                challenge_id=body.credential.challenge.id,
+            )
+            return _settlement_pending_problem(exc, body.credential.challenge.id)  # type: ignore[return-value]
         except ValueError as exc:
             logger.warning("session_failed", error=str(exc))
-            raise HTTPException(status_code=402, detail=str(exc)) from exc
+            return _payment_problem(str(exc), body.credential.challenge.id)  # type: ignore[return-value]
 
     return app

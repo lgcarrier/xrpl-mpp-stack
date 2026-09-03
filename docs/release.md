@@ -1,177 +1,101 @@
-# Release Playbook
+# Release playbook
 
-This repo publishes five Python packages with trusted publishing:
+The 0.2 stack publishes six Python packages:
 
 - `xrpl-mpp-core`
 - `xrpl-mpp-facilitator`
 - `xrpl-mpp-middleware`
 - `xrpl-mpp-client`
 - `xrpl-mpp-payer`
+- `xrpl-mpp-mcp`
 
-## Trusted Publishing Setup
+## Version and dependency rules
 
-Create each project on both PyPI and TestPyPI, then add a trusted publisher with these settings:
+Use one coordinated stack version such as `0.2.0`. Internal package ranges must
+accept that release and must not resolve to the incompatible 0.1 line. Verify
+the version in each `pyproject.toml` and generated/runtime version module.
 
-- Owner: `lgcarrier`
-- Repository: `xrpl-mpp-stack`
-- Workflow: `.github/workflows/publish-package.yml`
-- Environment:
-  - `testpypi-core` / `pypi-core` for `xrpl-mpp-core`
-  - `testpypi-facilitator` / `pypi-facilitator` for `xrpl-mpp-facilitator`
-  - `testpypi-middleware` / `pypi-middleware` for `xrpl-mpp-middleware`
-  - `testpypi-client` / `pypi-client` for `xrpl-mpp-client`
-  - `testpypi-payer` / `pypi-payer` for `xrpl-mpp-payer`
+Publish core before packages that depend on it. Publish client before payer.
+The MCP transport package is intentionally framework-neutral and has no stack
+package dependency, but should use the coordinated release tag for operator
+clarity.
 
-Each package needs its own environment because PyPI/TestPyPI treat the GitHub OIDC identity as the combination of repository, workflow, and environment.
+Every wheel must carry `LICENSE` under its own `.dist-info/licenses/`
+directory. Do not force-include a shared top-level `site-packages/LICENSE`,
+because uninstalling one stack distribution can then remove another's file.
 
-PyPI and TestPyPI currently allow only three pending trusted publishers at once. For the first release wave:
-
-1. Register pending publishers for `core`, `facilitator`, and `middleware`.
-2. Publish `core` on the target index.
-3. Add the `client` pending publisher on that index.
-4. Add the `payer` pending publisher on that index.
-5. Continue with `facilitator`, `middleware`, `client`, and `payer`.
-
-GitHub environments used by the workflow:
-
-- `testpypi-core`
-- `testpypi-facilitator`
-- `testpypi-middleware`
-- `testpypi-client`
-- `testpypi-payer`
-- `pypi-core`
-- `pypi-facilitator`
-- `pypi-middleware`
-- `pypi-client`
-- `pypi-payer`
-
-## Version Prep
-
-Current release line:
-
-- `0.1.4` for all five packages
-
-Before publishing:
-
-1. Update package versions in the relevant `packages/*/pyproject.toml` files if needed.
-2. Update [CHANGELOG.md](https://github.com/lgcarrier/xrpl-mpp-stack/blob/main/CHANGELOG.md).
-3. Confirm dependency ranges still match the release order you intend to publish.
-4. Confirm each package `project.urls` block still exposes `Documentation`, `Source`, `Issues`, and `Changelog`.
-
-## Local Verification
-
-Run the standard release checks:
+## Required verification
 
 ```bash
-pytest -q
-for package in packages/core packages/facilitator packages/middleware packages/client packages/payer; do
-  (
-    cd "$package"
-    python -m build --sdist
-    python -m build --wheel
-  )
-done
-twine check packages/*/dist/*
-PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools
-pip install -r docs/requirements.txt
+pytest
+PYTHONPYCACHEPREFIX=/tmp/pycache python -m compileall packages tests examples devtools conformance
 mkdocs build --strict
-docker build -t xrpl-mpp-facilitator .
 ```
 
-If settlement, replay protection, or signing changed, also run:
+Build every package, including MCP:
+
+```bash
+for package in packages/core packages/facilitator packages/middleware packages/client packages/payer packages/mcp; do
+  ( cd "$package" && python -m build --sdist && python -m build --wheel )
+done
+twine check packages/*/dist/*
+```
+
+Also run the official `mpp-tools` vector and flow conformance adapter pinned by
+the repository. The conformance workflow must retain a successful upstream
+`json_rpc_mcp_payment` fixture sanity check and separately execute that pinned
+fixture through `xrpl-mpp-mcp`; the upstream runner's JSON-RPC case does not
+invoke the selected adapter. It must also byte-match the cross-language Ripple
+SDK fixtures at pinned commit `6907484c92d217da406e2f3d7b5e6587703c6ea8`.
+Smoke the facilitator CLI, install built artifacts into clean environments,
+and build the Docker image.
+
+The live XRPL Testnet path is required when settlement, replay, signer, or
+ledger validation changes and credentials/network access are available:
 
 ```bash
 RUN_XRPL_TESTNET_LIVE=1 pytest -m live tests/integration/test_live_testnet.py -s
 ```
 
-## TestPyPI Rehearsal
+Record an unavailable faucet/RPC as a blocked external verification, not as a
+passing test.
 
-Run the `Publish Python Package` workflow manually for each package.
+## Tagging and trusted publishing
 
-This requires a pushed branch on GitHub. If the repository has not had its
-first commit pushed yet, do the local verification and clean-install rehearsal
-first, then create the initial branch before triggering the workflow.
+Follow the tag form enforced by `.github/workflows/publish-package.yml`:
 
-Recommended order:
-
-1. `core`
-2. `facilitator`
-3. `middleware`
-4. `client`
-5. `payer`
-
-If you use the GitHub CLI:
-
-```bash
-gh workflow run "Publish Python Package" -f package=core
-gh workflow run "Publish Python Package" -f package=facilitator
-gh workflow run "Publish Python Package" -f package=middleware
-gh workflow run "Publish Python Package" -f package=client
-gh workflow run "Publish Python Package" -f package=payer
+```text
+core-v0.2.0
+facilitator-v0.2.0
+middleware-v0.2.0
+client-v0.2.0
+payer-v0.2.0
+mcp-v0.2.0
 ```
 
-The workflow publishes to TestPyPI for `workflow_dispatch` runs and verifies clean installs after publishing.
+Before pushing a tag, verify it points at the reviewed commit, the tag version
+matches package metadata, trusted-publisher environments target the correct
+PyPI project, and no stale `dist/` artifact is included.
 
-## Verify TestPyPI Installs
+The publish workflow must remain gated on the full local verification job and
+the reusable pinned conformance workflow. A package tag must never bypass
+those checks and publish directly after only building metadata.
 
-TestPyPI installs should use PyPI as an extra index for shared dependencies:
+## Post-publish checks
 
-```bash
-python3.12 -m venv /tmp/xrpl-mpp-testpypi
-source /tmp/xrpl-mpp-testpypi/bin/activate
-pip install --upgrade pip
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-core==0.1.4
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-facilitator==0.1.4
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-middleware==0.1.4
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ xrpl-mpp-client==0.1.4
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "xrpl-mpp-payer[mcp]==0.1.4"
-```
+Install exact versions from TestPyPI/PyPI into clean environments, import the
+public package, smoke CLI entry points, and verify optional payer agent extras
+separately. Confirm source and wheel metadata with `twine check` and verify the
+published docs describe the same wire contract.
 
-## Production Publish
+For TestPyPI, download the exact target and coordinated internal stack wheels
+from TestPyPI with dependencies disabled, then install those local artifacts
+while resolving only third-party dependencies from PyPI. Never use PyPI as an
+extra index for selecting the artifact under test.
 
-After TestPyPI succeeds, publish in this order:
+## 0.2 release note warning
 
-```bash
-git tag core-v0.1.4
-git push origin core-v0.1.4
-```
-
-Wait for index availability, then publish the remaining packages:
-
-```bash
-git tag facilitator-v0.1.4
-git push origin facilitator-v0.1.4
-
-git tag middleware-v0.1.4
-git push origin middleware-v0.1.4
-
-git tag client-v0.1.4
-git push origin client-v0.1.4
-
-git tag payer-v0.1.4
-git push origin payer-v0.1.4
-```
-
-The publish workflow fails if the tag version and the package `version` field do not match.
-
-## Post-Publish Checks
-
-After each PyPI publish:
-
-1. Install the package into a clean virtualenv.
-2. Verify the package smoke import or CLI.
-3. Confirm the package README renders correctly on the PyPI project page.
-4. Confirm the PyPI sidebar links resolve to the expected docs page, package source path, issue tracker, and changelog.
-
-Example clean install checks:
-
-```bash
-python3.12 -m venv /tmp/xrpl-mpp-pypi
-source /tmp/xrpl-mpp-pypi/bin/activate
-pip install --upgrade pip
-pip install xrpl-mpp-core==0.1.4
-pip install xrpl-mpp-facilitator==0.1.4
-pip install xrpl-mpp-middleware==0.1.4
-pip install xrpl-mpp-client==0.1.4
-pip install "xrpl-mpp-payer[mcp]==0.1.4"
-```
+Call out the clean break prominently: named networks, canonical currency
+descriptors, selected payment header, cumulative PaymentChannel proofs, and the
+four-field receipt core. Operators must upgrade buyers, sellers, facilitator,
+and persisted protocol state together.

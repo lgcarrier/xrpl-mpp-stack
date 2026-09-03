@@ -1,0 +1,121 @@
+name: MPP Conformance
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MPP_TOOLS_REF: b6b07aac36973ca6cf2c7dc9d4e43696cee0bfc5
+  RIPPLE_XRPL_MPP_SDK_REF: 6907484c92d217da406e2f3d7b5e6587703c6ea8
+
+jobs:
+  core-protocol:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out xrpl-mpp-stack
+        uses: actions/checkout@v6
+
+      - name: Check out pinned mpp-tools
+        uses: actions/checkout@v6
+        with:
+          repository: tempoxyz/mpp-tools
+          ref: ${{ env.MPP_TOOLS_REF }}
+          path: mpp-tools
+
+      - name: Check out pinned Ripple XRPL MPP SDK
+        uses: actions/checkout@v6
+        with:
+          repository: ripple/xrpl-mpp-sdk
+          ref: ${{ env.RIPPLE_XRPL_MPP_SDK_REF }}
+          path: ripple-xrpl-mpp-sdk
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mpp-tools/conformance/package-lock.json
+
+      - name: Set up pinned pnpm for the Ripple SDK
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 10.19.0
+
+      - name: Install the pinned Ripple SDK dependencies
+        working-directory: ripple-xrpl-mpp-sdk
+        run: pnpm install --frozen-lockfile
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Install the source adapter environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e packages/core -e packages/mcp
+
+      - name: Register the repository-owned adapter
+        run: |
+          ln -s \
+            "$GITHUB_WORKSPACE/conformance/mpp-tools/xrpl-python" \
+            "$GITHUB_WORKSPACE/mpp-tools/conformance/adapters/xrpl-python"
+
+      - name: Install the pinned conformance runner
+        working-directory: mpp-tools/conformance
+        run: make install-runner
+
+      - name: Run core protocol vectors
+        working-directory: mpp-tools/conformance
+        run: uv run --locked python scripts/vector_runner.py --adapter xrpl-python
+
+      - name: Run shared upstream flows
+        # b6b07aa predates Payment-Authorization schemas/vectors. Native tests
+        # remain required for alternate-header binding and field selection.
+        working-directory: mpp-tools/conformance
+        run: >-
+          uv run --locked python scripts/flow_runner.py
+          --adapter xrpl-python --output json
+          > "$RUNNER_TEMP/mpp-flow-report.json"
+
+      - name: Require the upstream JSON-RPC fixture sanity check
+        # The pinned runner handles json_rpc_mcp_payment itself and does not
+        # route that case through the selected adapter.
+        run: >-
+          .venv/bin/python conformance/verify_mpp_tools_flow_report.py
+          "$RUNNER_TEMP/mpp-flow-report.json"
+
+      - name: Run xrpl-mpp-mcp against the pinned JSON-RPC fixture
+        run: >-
+          .venv/bin/python conformance/verify_mcp_transport_fixture.py
+          mpp-tools/conformance/flows/flows.json
+
+      - name: Generate Ripple SDK cross-language fixtures
+        run: |
+          cp \
+            conformance/ripple-xrpl-sdk/generate-fixtures.ts \
+            ripple-xrpl-mpp-sdk/scripts/xrpl-mpp-stack-generate-fixtures.ts
+          cd ripple-xrpl-mpp-sdk
+          pnpm exec tsx scripts/xrpl-mpp-stack-generate-fixtures.ts \
+            > "$RUNNER_TEMP/ripple-xrpl-mpp-fixtures.json"
+
+      - name: Verify pinned Ripple SDK fixtures
+        run: >-
+          diff -u conformance/ripple-xrpl-sdk/fixtures.json
+          "$RUNNER_TEMP/ripple-xrpl-mpp-fixtures.json"

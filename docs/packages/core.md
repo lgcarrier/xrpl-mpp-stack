@@ -1,74 +1,45 @@
-# Core
+# `xrpl-mpp-core`
 
-`xrpl-mpp-core` provides the shared MPP HTTP models and XRPL helpers used by the rest of the stack.
-
-## Use It When
-
-Use `xrpl-mpp-core` directly when you need to generate or validate MPP HTTP
-headers without pulling in the facilitator, middleware, or client runtime packages.
-
-It is the lowest-level package in the repo and is useful for custom seller
-integrations, custom buyers, or protocol tooling.
-
-## Install
+Install:
 
 ```bash
 pip install xrpl-mpp-core
 ```
 
-## Main Exports
+The core package owns wire compatibility. It has no network client or
+settlement service.
 
-Use it when you need direct access to:
+## MPP HTTP
 
-- `PaymentChallenge`
-- `PaymentCredential`
-- `PaymentReceipt`
-- `build_payment_challenge(...)`
-- `parse_payment_authorization_header(...)`
-- `encode_payment_receipt(...)`
+- `PaymentChallenge`, `PaymentCredential`, and `PaymentReceipt`
+- `AcceptPaymentRange` parsing, rendering, matching, and ranking
+- multiple `WWW-Authenticate: Payment` challenge extraction
+- selected `Authorization` / `Payment-Authorization` credential placement
+- `Payment-Receipt` codecs
+- RFC 8785 canonical JSON and strict unpadded base64url
+- content digests, expiry checks, and HMAC challenge key rotation
+- RFC 9457-compatible payment problem details
 
-Additional exported helpers cover:
+The challenge parser preserves protocol extensibility: unknown challenge
+extensions and future intent values can be read. Method-specific payload
+validators remain strict.
 
-- `WWW-Authenticate: Payment` parsing and rendering
-- base64url + JCS encoding and decoding for credentials and receipts
-- XRPL asset parsing for `XRP:native`, RLUSD, and USDC
-- body-digest and challenge-binding helpers for protected request validation
+## XRPL profile
 
-## Minimal Example
+- named `mainnet`, `testnet`, and `devnet` networks
+- XRP, issued-currency, and MPT currency descriptors
+- one-time charge request and transaction/hash credential payloads
+- XRPL DID construction/parsing and payer binding
+- deterministic InvoiceID derivation
+- PaymentChannel open/voucher/close payloads
+- cumulative high-water validation helpers
 
-```python
-from xrpl_mpp_core import (
-    XRPLChargeMethodDetails,
-    XRPLChargeRequest,
-    build_payment_challenge,
-    parse_payment_challenge,
-    render_payment_challenge,
-)
+`XRP` is the native-currency wire value. Issued currencies and MPTs are compact
+JSON strings. The pre-0.2 colon-delimited shorthand is deliberately rejected by
+the 0.2 parser.
 
-challenge = build_payment_challenge(
-    secret="replace-with-a-shared-secret",
-    realm="merchant.example",
-    method="xrpl",
-    intent="charge",
-    request_model=XRPLChargeRequest(
-        amount="1000",
-        currency="XRP:native",
-        recipient="rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe",
-        methodDetails=XRPLChargeMethodDetails(
-            network="xrpl:1",
-            invoiceId="A" * 64,
-        ),
-    ),
-    expires_in_seconds=300,
-)
+## Receipt compatibility
 
-header_value = render_payment_challenge(challenge)
-decoded = parse_payment_challenge(header_value)
-```
-
-## Notes
-
-- Currency identifiers use `CODE:issuer` for issued assets and `XRP:native` for XRP.
-- Charge requests bind to `invoiceId`; session requests bind to `sessionId`.
-- The rest of the stack builds on these models, so `xrpl-mpp-core` is the right
-  package when you need protocol correctness without any HTTP or FastAPI runtime.
+Code consuming a receipt should depend on `status`, `method`, `timestamp`, and
+`reference`, then inspect XRPL extensions only when needed. Unknown method
+extensions should not break a generic MPP client.

@@ -25,7 +25,13 @@ from devtools.live_testnet_support import (
     wait_for_trustline_balance_increase,
     wallet_cache_path,
 )
-from xrpl_mpp_core import RLUSD_CODE, USDC_CODE
+from xrpl_mpp_core import (
+    IssuedCurrency,
+    RLUSD_CODE,
+    USDC_CODE,
+    normalize_currency_code,
+    parse_currency,
+)
 
 DEFAULT_CONTRACT_PATH = Path("demo.contract.json")
 DEFAULT_MERCHANT_XRP_FLOOR_XRP = Decimal("100")
@@ -117,6 +123,26 @@ def load_contract_assets(contract_path: Path) -> list[ContractAsset]:
         assets.append(ContractAsset(symbol=symbol, env_path=env_path.resolve()))
 
     return assets
+
+
+def issued_currency_issuer(
+    env_path: Path,
+    env_values: dict[str, str],
+    *,
+    symbol: str,
+) -> str:
+    raw_currency = (env_values.get("PRICE_CURRENCY") or "").strip()
+    if not raw_currency:
+        raise RuntimeError(f"{env_path} is missing PRICE_CURRENCY for {symbol}")
+    try:
+        currency = parse_currency(raw_currency)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{env_path} has an invalid PRICE_CURRENCY for {symbol}") from exc
+    if not isinstance(currency, IssuedCurrency):
+        raise RuntimeError(f"{env_path} PRICE_CURRENCY is not an issued {symbol} currency")
+    if normalize_currency_code(currency.currency) != symbol:
+        raise RuntimeError(f"{env_path} PRICE_CURRENCY does not identify {symbol}")
+    return currency.issuer
 
 
 def parse_xrp_to_drops(value: Decimal | str) -> int:
@@ -414,8 +440,26 @@ def rebalance_contract_assets(
         asset.symbol: load_env_file(asset.env_path)
         for asset in contract_assets
     }
-    rlusd_issuer = (env_values_by_symbol.get("RLUSD", {}).get("PRICE_ASSET_ISSUER") or "").strip() or None
-    usdc_issuer = (env_values_by_symbol.get("USDC", {}).get("PRICE_ASSET_ISSUER") or "").strip() or None
+    rlusd_env = next((asset for asset in contract_assets if asset.symbol == "RLUSD"), None)
+    usdc_env = next((asset for asset in contract_assets if asset.symbol == "USDC"), None)
+    rlusd_issuer = (
+        issued_currency_issuer(
+            rlusd_env.env_path,
+            env_values_by_symbol["RLUSD"],
+            symbol="RLUSD",
+        )
+        if rlusd_env is not None
+        else None
+    )
+    usdc_issuer = (
+        issued_currency_issuer(
+            usdc_env.env_path,
+            env_values_by_symbol["USDC"],
+            symbol="USDC",
+        )
+        if usdc_env is not None
+        else None
+    )
     results: list[RebalanceResult] = []
 
     for asset in contract_assets:
@@ -448,9 +492,11 @@ def rebalance_contract_assets(
                 moved_amount, tx_hash = Decimal("0"), None
                 status = "skipped"
         elif asset.symbol == "RLUSD":
-            issuer = (env_values.get("PRICE_ASSET_ISSUER") or "").strip()
-            if not issuer:
-                raise RuntimeError(f"{asset.env_path} is missing PRICE_ASSET_ISSUER for RLUSD")
+            issuer = issued_currency_issuer(
+                asset.env_path,
+                env_values,
+                symbol="RLUSD",
+            )
             moved_amount, tx_hash = rebalance_rlusd_asset(
                 client,
                 merchant_wallet=wallet_set.merchant_wallet,
@@ -459,9 +505,11 @@ def rebalance_contract_assets(
             )
             status = "rebalanced" if moved_amount > 0 else "noop"
         elif asset.symbol == "USDC":
-            issuer = (env_values.get("PRICE_ASSET_ISSUER") or "").strip()
-            if not issuer:
-                raise RuntimeError(f"{asset.env_path} is missing PRICE_ASSET_ISSUER for USDC")
+            issuer = issued_currency_issuer(
+                asset.env_path,
+                env_values,
+                symbol="USDC",
+            )
             moved_amount, tx_hash = rebalance_usdc_asset(
                 client,
                 merchant_wallet=wallet_set.merchant_wallet,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 from pathlib import Path
 from typing import Sequence
 
@@ -11,7 +12,14 @@ from devtools.live_testnet_support import (
     wallet_cache_path,
 )
 from devtools.quickstart import DEFAULT_PRICE_DROPS
-from xrpl_mpp_core import NETWORK_RLUSD_ISSUERS, NETWORK_USDC_ISSUERS, asset_identifier_from_parts
+from xrpl_mpp_core import (
+    NETWORK_RLUSD_ISSUERS,
+    NETWORK_USDC_ISSUERS,
+    IssuedCurrency,
+    normalize_currency_code,
+    serialize_currency,
+    xrpl_currency_code,
+)
 
 DEFAULT_BASE_PATH = Path(".env.quickstart")
 DEFAULT_RLUSD_AMOUNT = "1.25"
@@ -98,8 +106,8 @@ def demo_allowed_issued_assets(*, asset: str, issuer: str | None, network_id: st
         return ""
     if issuer == built_in_issuer(asset, network_id):
         return ""
-    code = asset.upper()
-    return asset_identifier_from_parts(code, issuer)
+    code = normalize_currency_code(asset)
+    return f"{code}:{issuer.strip()}"
 
 
 def configure_demo_env(
@@ -113,13 +121,16 @@ def configure_demo_env(
 ) -> None:
     if asset == "xrp":
         resolved_price_drops = price_drops or int(
-            get_env_value(lines, "PRICE_DROPS") or str(DEFAULT_PRICE_DROPS)
+            get_env_value(lines, "PRICE_AMOUNT") or str(DEFAULT_PRICE_DROPS)
         )
-        set_env_value(lines, "PRICE_DROPS", str(resolved_price_drops))
-        set_env_value(lines, "PRICE_ASSET_CODE", "XRP")
-        set_env_value(lines, "PRICE_ASSET_ISSUER", "")
-        set_env_value(lines, "PRICE_ASSET_AMOUNT", "")
-        set_env_value(lines, "PAYMENT_ASSET", "XRP:native")
+        set_env_value(lines, "PRICE_AMOUNT", str(resolved_price_drops))
+        set_env_value(lines, "PRICE_CURRENCY", "XRP")
+        set_env_value(lines, "PAYMENT_CURRENCY", "XRP")
+        set_env_value(
+            lines,
+            "XRPL_MPP_MAX_SPEND",
+            format(Decimal(resolved_price_drops) / Decimal("1000000"), "f"),
+        )
         set_env_value(lines, "ALLOWED_ISSUED_ASSETS", "")
         return
 
@@ -127,10 +138,13 @@ def configure_demo_env(
         raise ValueError(f"{asset} demos require both an issuer and an amount")
 
     code = asset.upper()
-    set_env_value(lines, "PRICE_ASSET_CODE", code)
-    set_env_value(lines, "PRICE_ASSET_ISSUER", issuer)
-    set_env_value(lines, "PRICE_ASSET_AMOUNT", amount)
-    set_env_value(lines, "PAYMENT_ASSET", asset_identifier_from_parts(code, issuer))
+    currency = serialize_currency(
+        IssuedCurrency(currency=xrpl_currency_code(code), issuer=issuer)
+    )
+    set_env_value(lines, "PRICE_AMOUNT", amount)
+    set_env_value(lines, "PRICE_CURRENCY", currency)
+    set_env_value(lines, "PAYMENT_CURRENCY", currency)
+    set_env_value(lines, "XRPL_MPP_MAX_SPEND", amount)
     set_env_value(
         lines,
         "ALLOWED_ISSUED_ASSETS",
@@ -170,8 +184,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     network_id = (
         get_env_value(lines, "NETWORK_ID")
         or get_env_value(lines, "XRPL_NETWORK")
-        or "xrpl:1"
-    ).strip() or "xrpl:1"
+        or "testnet"
+    ).strip() or "testnet"
 
     issuer: str | None = None
     amount: str | None = None
@@ -199,16 +213,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Network: {network_id}")
     print(f"Demo asset: {args.asset.upper()}")
     print(f"Buyer address: {buyer_address}")
-    print(f"Buyer payment asset: {get_env_value(lines, 'PAYMENT_ASSET')}")
+    print(f"Buyer payment currency: {get_env_value(lines, 'PAYMENT_CURRENCY')}")
     if args.asset == "xrp":
-        print(f"Merchant price drops: {get_env_value(lines, 'PRICE_DROPS')}")
+        print(f"Merchant price drops: {get_env_value(lines, 'PRICE_AMOUNT')}")
     else:
         print(
             "Merchant price: "
-            f"{get_env_value(lines, 'PRICE_ASSET_AMOUNT')} "
-            f"{get_env_value(lines, 'PRICE_ASSET_CODE')}"
+            f"{get_env_value(lines, 'PRICE_AMOUNT')} {args.asset.upper()}"
         )
-        print(f"Merchant issuer: {get_env_value(lines, 'PRICE_ASSET_ISSUER')}")
+        print(f"Merchant currency: {get_env_value(lines, 'PRICE_CURRENCY')}")
     allowed_issued_assets = get_env_value(lines, "ALLOWED_ISSUED_ASSETS") or ""
     if allowed_issued_assets:
         print(f"Facilitator extra issued assets: {allowed_issued_assets}")

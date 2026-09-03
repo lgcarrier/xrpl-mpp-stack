@@ -5,6 +5,12 @@ import pytest
 import xrpl_mpp_core.testnet_rpc as testnet_rpc
 
 
+def test_official_public_testnet_rpc_is_the_preferred_default() -> None:
+    assert testnet_rpc.PUBLIC_TESTNET_RPC_URLS[0] == (
+        "https://s.altnet.rippletest.net:51234/"
+    )
+
+
 def test_resolve_testnet_rpc_url_returns_explicit_override_without_probe(
     monkeypatch,
 ) -> None:

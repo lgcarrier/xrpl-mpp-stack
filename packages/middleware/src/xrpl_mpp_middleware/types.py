@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from xrpl_mpp_core import StrictModel, canonical_asset_identifier, xrpl_asset_from_identifier
+from xrpl_mpp_core import StrictModel, XRPLNetwork, parse_currency
 
 
 class ChargeRouteSpec(StrictModel):
-    network: str
+    network: XRPLNetwork
     recipient: str
-    asset_identifier: str = Field(alias="assetIdentifier")
+    currency: str
     amount: str
     description: str | None = None
     external_id: str | None = Field(default=None, alias="externalId")
 
-    @field_validator("network", "recipient", "asset_identifier", "amount")
+    @field_validator("recipient", "currency", "amount")
     @classmethod
     def _validate_required_strings(cls, value: str) -> str:
         normalized = value.strip()
@@ -21,25 +23,23 @@ class ChargeRouteSpec(StrictModel):
             raise ValueError("Value is required")
         return normalized
 
-    @field_validator("asset_identifier")
+    @field_validator("currency")
     @classmethod
-    def _normalize_asset_identifier(cls, value: str) -> str:
-        return canonical_asset_identifier(xrpl_asset_from_identifier(value))
+    def _validate_currency(cls, value: str) -> str:
+        parse_currency(value)
+        return value
 
 
 class SessionRouteSpec(StrictModel):
-    network: str
+    network: XRPLNetwork
     recipient: str
-    asset_identifier: str = Field(alias="assetIdentifier")
     amount: str
-    min_prepay_amount: str = Field(alias="minPrepayAmount")
-    unit_amount: str | None = Field(default=None, alias="unitAmount")
+    currency: Literal["XRP"] = "XRP"
+    channel_id: str = Field(default="", alias="channelId")
     description: str | None = None
     external_id: str | None = Field(default=None, alias="externalId")
-    idle_timeout_seconds: int | None = Field(default=None, alias="idleTimeoutSeconds")
-    metering_hints: dict[str, str] | None = Field(default=None, alias="meteringHints")
 
-    @field_validator("network", "recipient", "asset_identifier", "amount", "min_prepay_amount")
+    @field_validator("recipient", "amount")
     @classmethod
     def _validate_required_strings(cls, value: str) -> str:
         normalized = value.strip()
@@ -47,20 +47,13 @@ class SessionRouteSpec(StrictModel):
             raise ValueError("Value is required")
         return normalized
 
-    @field_validator("asset_identifier")
+    @field_validator("channel_id")
     @classmethod
-    def _normalize_asset_identifier(cls, value: str) -> str:
-        return canonical_asset_identifier(xrpl_asset_from_identifier(value))
-
-    @model_validator(mode="after")
-    def _sync_unit_amount(self) -> "SessionRouteSpec":
-        if self.unit_amount is None:
-            self.unit_amount = self.amount
-        elif self.unit_amount != self.amount:
-            raise ValueError(
-                "unitAmount must match amount in this release; variable metering is not implemented yet"
-            )
-        return self
+    def _validate_channel_id(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized and (len(normalized) != 64 or any(char not in "0123456789ABCDEF" for char in normalized)):
+            raise ValueError("channelId must be empty or 64 hexadecimal characters")
+        return normalized
 
 
 class RouteConfig(StrictModel):
@@ -71,6 +64,14 @@ class RouteConfig(StrictModel):
     description: str | None = None
     mime_type: str = Field(default="application/json", alias="mimeType")
     realm: str | None = None
+    credential_header: Literal["Authorization", "Payment-Authorization"] = Field(
+        default="Authorization",
+        alias="credentialHeader",
+    )
+    allow_insecure_facilitator_http: bool = Field(
+        default=False,
+        alias="allowInsecureFacilitatorHttp",
+    )
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True, str_strip_whitespace=True)
 

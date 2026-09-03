@@ -1,157 +1,74 @@
-# Open XRPL MPP Stack
+# Open XRPL MPP Stack 0.2
 
-Hosted docs for the XRPL-first MPP HTTP stack:
+This project provides a Python 3.12 seller, facilitator, and buyer stack for
+Machine Payments Protocol payments on the XRP Ledger.
 
-- `xrpl-mpp-core`
-- `xrpl-mpp-facilitator`
-- `xrpl-mpp-middleware`
-- `xrpl-mpp-client`
-- `xrpl-mpp-payer`
+Version 0.2 follows the current
+[MPP drafts](https://github.com/tempoxyz/mpp-specs) and interoperates with the
+XRPL method implemented by the
+[Ripple reference SDK](https://github.com/ripple/xrpl-mpp-sdk). It is a clean
+wire break from the repository's 0.1 session design.
 
-## Start Here
+## Choose a package
 
-If you want to see a real payment succeed on XRPL Testnet, go straight to the
-[Testnet XRP quickstart](quickstart/testnet-xrp.md).
+| Package | Use it for |
+| --- | --- |
+| `xrpl-mpp-core` | MPP HTTP wire models, codecs, challenge binding, and XRPL profile types |
+| `xrpl-mpp-facilitator` | Verifying and settling XRPL credentials behind authenticated seller gateways |
+| `xrpl-mpp-middleware` | Protecting ASGI routes, issuing challenges, discovery, hooks, and relay |
+| `xrpl-mpp-client` | Signing charges and PayChannel claims and retrying with `httpx` |
+| `xrpl-mpp-payer` | Operating a payer CLI, local proxy, receipt store, or agent-facing service |
+| `xrpl-mpp-mcp` | Adding native MPP payment metadata to MCP/JSON-RPC operations |
 
-That flow uses:
+## What is implemented
 
-- `python -m devtools.quickstart` to generate reusable Testnet wallets and `.env.quickstart`
-- `docker compose --env-file .env.quickstart up --build` to run the facilitator, merchant, and Redis
-- `docker compose --env-file .env.quickstart --profile demo run --rm buyer` to trigger the paid request
+- MPP HTTP `charge` and `session` challenges
+- `Authorization: Payment` and challenge-selected `Payment-Authorization`
+- `Accept-Payment` negotiation and multiple challenge selection
+- successful-response `Payment-Receipt` fields and XRPL method extensions
+- XRPL charge pull mode (signed blob) and push mode (transaction hash)
+- XRP, issued currencies, and MPT currency descriptors
+- named `mainnet`, `testnet`, and `devnet` networks
+- PaymentChannel `open`, cumulative `voucher`, and `close` proofs
+- discovery draft-01 OpenAPI metadata for `charge` and `session`
+- native MCP transport metadata and paid-operation binding
+- opt-in application lifecycle hooks and sanitized outcome relay
 
-The quickstart probes public XRPL Testnet RPC servers and writes the first healthy
-endpoint into `.env.quickstart` as `XRPL_RPC_URL`. Override that selection with
-`XRPL_TESTNET_RPC_URL` or `python -m devtools.quickstart --xrpl-rpc-url ...` when
-you want to pin a specific provider.
+The generic upstream subscription intent is recognized as an extensibility
+point, but this stack does not claim an XRPL subscription method profile.
 
-## Guides By Goal
-
-- Understand the stack layout: [Architecture Overview](architecture.md)
-- Protect seller routes: [Seller Integration](integrations/seller.md)
-- Build or operate a buyer: [Buyer Integration](integrations/buyer.md)
-- Choose the right environment settings: [Deployment Modes](configuration/deployment-modes.md)
-- Run XRP, RLUSD, or USDC demos: [Run Demo Variants](quickstart/demo-variants.md)
-
-## Package Chooser
-
-Pick the package for the role you are building. Most integrators start with
-`xrpl-mpp-middleware` on the seller side or `xrpl-mpp-client` on the buyer side,
-then add `xrpl-mpp-facilitator` as the settlement service.
-
-| Package | PyPI | Install | Use when |
-| --- | --- | --- | --- |
-| [Core](packages/core.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-core?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-core/) | `pip install xrpl-mpp-core` | You need the shared MPP models, codecs, and XRPL asset helpers directly. |
-| [Facilitator](packages/facilitator.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-facilitator?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-facilitator/) | `pip install xrpl-mpp-facilitator` | You are running the FastAPI settlement service behind protected seller routes. |
-| [Middleware](packages/middleware.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-middleware?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-middleware/) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes that should return `402` until paid. |
-| [Client](packages/client.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-client?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-client/) | `pip install xrpl-mpp-client` | You are building a buyer that signs XRPL payments and retries MPP challenges automatically. |
-| [Payer](packages/payer.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-payer?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-payer/) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, or MCP support for agents. |
-
-If you want the shortest path to a working stack, read the
-[middleware guide](packages/middleware.md), the [client guide](packages/client.md),
-then run the [Testnet XRP quickstart](quickstart/testnet-xrp.md).
-
-## Install Commands
+## Start locally
 
 ```bash
-pip install xrpl-mpp-core
-pip install xrpl-mpp-facilitator
-pip install xrpl-mpp-middleware
-pip install xrpl-mpp-client
-pip install xrpl-mpp-payer
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+cp .env.example .env
+pytest
 ```
 
-Full AI agent support:
+Configure Testnet values in `.env`, then start the development services:
 
 ```bash
-pip install "xrpl-mpp-payer[mcp]"
-xrpl-mpp skill install
-xrpl-mpp mcp
-claude mcp add xrpl-mpp-payer -- xrpl-mpp mcp
+docker compose up --build redis facilitator merchant
 ```
 
-## Comparison Table
-
-| Package | Runs where | Main entry points | Depends on facilitator | Optional extras |
-| --- | --- | --- | --- | --- |
-| `xrpl-mpp-core` | Shared library code | `PaymentChallenge`, `PaymentCredential`, `PaymentReceipt`, header codecs, XRPL asset helpers | No | None |
-| `xrpl-mpp-facilitator` | Seller infrastructure or service tier | `create_app(...)`, `xrpl_mpp_facilitator.main:app`, `xrpl-mpp-facilitator` | It is the facilitator | None |
-| `xrpl-mpp-middleware` | Seller app | `PaymentMiddlewareASGI`, `require_payment(...)`, `require_session(...)`, `XRPLFacilitatorClient` | Yes | None |
-| `xrpl-mpp-client` | Buyer app or integration test harness | `XRPLPaymentSigner`, `XRPLPaymentTransport`, `wrap_httpx_with_mpp_payment(...)` | Yes, against a protected seller route | None |
-| `xrpl-mpp-payer` | Buyer operator or local agent runtime | `xrpl-mpp`, `pay_with_mpp(...)`, `XRPLPayer`, bundled skill, stdio MCP server | Yes, against a protected seller route | `[mcp]` |
-
-## Beyond XRP
-
-The primary quickstart is XRP on Testnet for the fastest real success path.
-
-When you switch the demo to issued assets, the merchant uses `PRICE_*` variables
-and the buyer uses `PAYMENT_ASSET`. The quickstart wallet cache keeps one shared
-merchant wallet plus dedicated buyer wallets for XRP, RLUSD, and USDC, so the
-derived env files can run in parallel without sharing one signing account.
-
-### RLUSD Demo Config
-
-Generate a derived env file:
+Run the buyer from another terminal. Compose explicitly opts its merchant into
+the private plaintext facilitator hop; the normal facilitator client requires
+HTTPS and has no environment-only insecure override. Use an HTTPS facilitator
+outside this development profile.
 
 ```bash
-python -m devtools.demo_env --asset rlusd
+docker compose --profile demo run --rm buyer
 ```
 
-Then restart the stack and rerun the buyer:
+Do not use a funded mainnet wallet for development. The live Testnet test is
+excluded from normal `pytest` runs and must be enabled explicitly.
 
-```bash
-docker compose --env-file .env.quickstart.rlusd up --build
-docker compose --env-file .env.quickstart.rlusd --profile demo run --rm buyer
-```
+## Read next
 
-Use the [RLUSD guide](asset-guides/rlusd.md) for faucet setup, trustline details,
-and claim recovery behavior.
-
-### USDC Demo Config
-
-Generate a derived env file:
-
-```bash
-python -m devtools.demo_env --asset usdc
-```
-
-Then restart the stack and rerun the buyer:
-
-```bash
-docker compose --env-file .env.quickstart.usdc up --build
-docker compose --env-file .env.quickstart.usdc --profile demo run --rm buyer
-```
-
-Use the [USDC guide](asset-guides/usdc.md) for the Circle faucet flow and sweep behavior.
-
-## Configuration At A Glance
-
-The full environment reference lives in [Configuration](configuration.md). For the
-common local stack, the important knobs are:
-
-- `MY_DESTINATION_ADDRESS` for the merchant settlement wallet
-- `FACILITATOR_BEARER_TOKEN` for middleware-to-facilitator auth in `single_token` mode
-- `REDIS_URL` for replay protection and session state
-- `MPP_CHALLENGE_SECRET` for binding MPP challenges to the protected request
-- `NETWORK_ID`, `XRPL_NETWORK`, and `XRPL_RPC_URL` for the XRPL network you are targeting
-- `PRICE_*` and `PAYMENT_ASSET` for demo pricing and issued-asset examples
-
-## What The Stack Does
-
-This MPP-native stack exposes the current facilitator contract:
-
-- `GET /health`
-- `GET /supported`
-- `POST /charge`
-- `POST /session`
-
-The middleware emits `WWW-Authenticate: Payment`, buyers retry with
-`Authorization: Payment`, and successful responses include `Payment-Receipt`.
-
-The request lifecycle is documented in [Payment Flow](how-it-works/payment-flow.md).
-The exact wire format is documented in
-[Header Contract](how-it-works/header-contract.md). Replay protection, bounded
-ledger freshness, and session-state behavior are documented in
-[Replay And Freshness](how-it-works/replay-and-freshness.md). Integration guidance
-for MPP-native sellers and buyers lives in [Seller Integration](integrations/seller.md),
-[Buyer Integration](integrations/buyer.md), and
-[MPP HTTP Integration](integrations/mpp-http.md).
+- [Architecture](architecture.md)
+- [Header contract](how-it-works/header-contract.md)
+- [Payment flows](how-it-works/payment-flow.md)
+- [Configuration](configuration.md)
+- [0.1 migration notes](integrations/mpp-http.md)

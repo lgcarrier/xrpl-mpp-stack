@@ -7,46 +7,49 @@ from pathlib import Path
 
 import httpx
 import pytest
+from xrpl.core import binarycodec
+from xrpl.models.transactions import Payment
 from xrpl.wallet import Wallet
 
+from xrpl_mpp_client import PaymentPolicyError, derive_paychannel_open_binding
 from xrpl_mpp_core import (
+    PAYMENT_AUTHORIZATION_HEADER,
     FacilitatorSupportedMethod,
     FacilitatorSupportedResponse,
+    IssuedCurrency,
     PaymentReceipt,
     RLUSD_TESTNET_ISSUER,
-    XRPLAsset,
     XRPLChargeMethodDetails,
     XRPLChargeRequest,
+    XRPLSessionMethodDetails,
+    XRPLSessionRequest,
     build_payment_challenge,
+    challenge_invoice_id,
+    decode_charge_payload,
+    decode_challenge_request,
+    decode_payment_credential,
+    decode_session_payload,
     encode_payment_receipt,
     render_payment_challenge,
+    serialize_currency,
+    xrpl_currency_code,
 )
 
 FACILITATOR_TOKEN = "example-facilitator-token"
 DESTINATION = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
-PAYER = "rEXAMPLEPAYER123456789"
-TX_HASH = "EXAMPLE-TX-HASH-123"
+TX_HASH = "A" * 64
 CHALLENGE_SECRET = "example-challenge-secret"
+INVOICE_ID = "B" * 64
+CHANNEL_ID = "C" * 64
+RLUSD_CURRENCY = serialize_currency(
+    IssuedCurrency(
+        currency=xrpl_currency_code("RLUSD"),
+        issuer=RLUSD_TESTNET_ISSUER,
+    )
+)
 
 
 class FakeFacilitatorClient:
-    def __init__(self) -> None:
-        self.receipt = PaymentReceipt(
-            method="xrpl",
-            timestamp="2026-03-21T12:00:00Z",
-            reference=TX_HASH,
-            challengeId="challenge-id",
-            intent="charge",
-            network="xrpl:1",
-            payer=PAYER,
-            recipient=DESTINATION,
-            invoiceId="A" * 64,
-            txHash=TX_HASH,
-            settlementStatus="validated",
-            asset={"code": "XRP"},
-            amount={"value": "1000", "unit": "drops", "asset": {"code": "XRP"}, "drops": 1000},
-        )
-
     async def startup(self) -> None:
         return None
 
@@ -59,65 +62,116 @@ class FakeFacilitatorClient:
                 FacilitatorSupportedMethod(
                     method="xrpl",
                     intents=["charge", "session"],
-                    network="xrpl:1",
-                    assets=[XRPLAsset(code="XRP"), XRPLAsset(code="RLUSD", issuer=RLUSD_TESTNET_ISSUER)],
+                    network="testnet",
+                    currencies=["XRP", RLUSD_CURRENCY],
                     settlementMode="validated",
                 )
             ]
         )
 
     async def charge(self, credential):
-        return self.receipt.model_copy(update={"challengeId": credential.challenge.id})
+        payload = decode_charge_payload(credential)
+        assert payload.type == "transaction"
+        transaction = Payment.from_xrpl(binarycodec.decode(payload.blob))
+        terms = decode_challenge_request(credential.challenge)
+        details = terms.method_details
+        invoice_id = (
+            details.invoice_id
+            if details is not None and details.invoice_id is not None
+            else challenge_invoice_id(credential.challenge.id)
+        )
+        tx_hash = transaction.get_hash().upper()
+        return PaymentReceipt(
+            status="success",
+            method="xrpl",
+            timestamp="2026-03-21T12:00:00Z",
+            reference=tx_hash,
+            challengeId=credential.challenge.id,
+            network="testnet",
+            payer=transaction.account,
+            recipient=terms.recipient,
+            invoiceId=invoice_id,
+            txHash=tx_hash,
+            settlementStatus="validated",
+        )
 
     async def session(self, credential):
-        raise AssertionError("session not used in example tests")
+        raise AssertionError("session not used in charge example tests")
 
 
-def test_merchant_example_supports_issued_asset_pricing(monkeypatch) -> None:
+def test_merchant_example_uses_canonical_issued_currency(monkeypatch) -> None:
     monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
     monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
     monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
-    monkeypatch.setenv("XRPL_NETWORK", "xrpl:1")
-    monkeypatch.setenv("PRICE_ASSET_CODE", "RLUSD")
-    monkeypatch.setenv("PRICE_ASSET_ISSUER", "rRLUSDISSUER")
-    monkeypatch.setenv("PRICE_ASSET_AMOUNT", "1.25")
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    monkeypatch.setenv("PRICE_CURRENCY", RLUSD_CURRENCY)
+    monkeypatch.setenv("PRICE_AMOUNT", "1.25")
 
-    merchant_example = importlib.import_module("examples.merchant_fastapi.app")
-    merchant_example = importlib.reload(merchant_example)
+    merchant = importlib.reload(importlib.import_module("examples.merchant_fastapi.app"))
+    option = merchant.build_premium_route_config().charge_options[0]
 
-    route_config = merchant_example.build_premium_route_config()
-    option = route_config.charge_options[0]
-
-    assert option.asset_identifier == "RLUSD:rRLUSDISSUER"
+    assert option.network == "testnet"
+    assert option.currency == RLUSD_CURRENCY
     assert option.amount == "1.25"
+    assert merchant.build_premium_route_config().allow_insecure_facilitator_http is False
 
 
-def test_merchant_example_ignores_comment_only_placeholders(monkeypatch) -> None:
-    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
-    monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
-    monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
-    monkeypatch.setenv("XRPL_NETWORK", "xrpl:1")
-    monkeypatch.setenv("PRICE_ASSET_CODE", "   # set to RLUSD or USDC for issued-asset demos")
-    monkeypatch.setenv("PRICE_ASSET_ISSUER", "   # issuer for issued-asset demos")
-    monkeypatch.setenv("PRICE_ASSET_AMOUNT", "   # issued-asset amount for merchant pricing")
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://localhost:8000", True),
+        ("http://localhost.:8000", True),
+        ("http://127.0.0.1:8000", True),
+        ("http://[::1]:8000", True),
+        ("https://127.0.0.1:8000", False),
+        ("http://facilitator.example:8000", False),
+        ("not-a-url", False),
+    ],
+)
+def test_seller_insecure_facilitator_helper_is_loopback_only(
+    url: str,
+    expected: bool,
+) -> None:
+    from examples._facilitator import allow_insecure_loopback_facilitator
 
-    merchant_example = importlib.import_module("examples.merchant_fastapi.app")
-    merchant_example = importlib.reload(merchant_example)
-
-    route_config = merchant_example.build_premium_route_config()
-    option = route_config.charge_options[0]
-
-    assert option.asset_identifier == "XRP:native"
-    assert option.amount == "1000"
+    assert allow_insecure_loopback_facilitator(url) is expected
 
 
-def test_buyer_example_passes_env_asset_selection(monkeypatch) -> None:
-    buyer_example = importlib.import_module("examples.buyer_httpx")
-    buyer_example = importlib.reload(buyer_example)
+def test_example_spend_cap_conversion_uses_wire_units() -> None:
+    from examples._policy import spend_cap_to_policy_amount
 
-    signer = buyer_example.XRPLPaymentSigner(
+    assert spend_cap_to_policy_amount(currency="XRP", max_spend="0.01") == "10000"
+    assert (
+        spend_cap_to_policy_amount(currency=RLUSD_CURRENCY, max_spend="1.25")
+        == "1.25"
+    )
+    with pytest.raises(ValueError, match="whole number of XRP drops"):
+        spend_cap_to_policy_amount(currency="XRP", max_spend="0.0000001")
+
+
+def test_all_seller_examples_reject_remote_plaintext_facilitator_opt_in(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.example:8000")
+
+    merchant = importlib.reload(importlib.import_module("examples.merchant_fastapi.app"))
+    minimal = importlib.reload(importlib.import_module("examples.seller_minimal"))
+    paychannel = importlib.reload(importlib.import_module("examples.seller_paychannel"))
+
+    assert merchant.build_premium_route_config().allow_insecure_facilitator_http is False
+    assert minimal.build_premium_route_config().allow_insecure_facilitator_http is False
+    assert (
+        paychannel._session_route(amount=0, description="open")
+        .allow_insecure_facilitator_http
+        is False
+    )
+
+
+def test_buyer_example_passes_currency_preference(monkeypatch) -> None:
+    buyer = importlib.reload(importlib.import_module("examples.buyer_httpx"))
+    signer = buyer.XRPLPaymentSigner(
         Wallet.create(),
-        network="xrpl:1",
+        network="testnet",
         autofill_enabled=False,
     )
     captured: dict[str, object] = {}
@@ -130,330 +184,326 @@ def test_buyer_example_passes_env_asset_selection(monkeypatch) -> None:
             return None
 
         async def get(self, url: str) -> httpx.Response:
-            return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", url))
+            return httpx.Response(200, request=httpx.Request("GET", url))
 
-    def fake_wrap_httpx_with_mpp_payment(
+    def fake_wrap(
         _signer,
         *,
-        asset=None,
+        currency=None,
         transport=None,
         timeout=None,
+        payment_policy=None,
+        allow_insecure_localhost=False,
         **_kwargs,
     ):
-        captured["asset"] = asset
-        captured["transport"] = transport
-        captured["timeout"] = timeout
+        captured.update(
+            currency=currency,
+            transport=transport,
+            timeout=timeout,
+            payment_policy=payment_policy,
+            allow_insecure_localhost=allow_insecure_localhost,
+        )
         return DummyClient()
 
-    monkeypatch.setenv("PAYMENT_ASSET", "RLUSD:rRLUSDISSUER")
-    monkeypatch.setattr(
-        buyer_example,
-        "wrap_httpx_with_mpp_payment",
-        fake_wrap_httpx_with_mpp_payment,
-    )
+    monkeypatch.setenv("PAYMENT_CURRENCY", RLUSD_CURRENCY)
+    monkeypatch.setenv("XRPL_MPP_EXPECTED_RECIPIENT", DESTINATION)
+    monkeypatch.setenv("XRPL_MPP_MAX_SPEND", "1.25")
+    monkeypatch.setattr(buyer, "wrap_httpx_with_mpp_payment", fake_wrap)
 
     response = asyncio.run(
-        buyer_example.fetch_paid_resource(
+        buyer.fetch_paid_resource(
             signer=signer,
-            target_url="http://merchant.local/premium",
+            target_url="http://127.0.0.1/premium",
         )
     )
-
     assert response.status_code == 200
-    assert captured["asset"] == "RLUSD:rRLUSDISSUER"
-    assert captured["timeout"] == buyer_example.DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert captured["currency"] == RLUSD_CURRENCY
+    assert captured["timeout"] == buyer.DEFAULT_REQUEST_TIMEOUT_SECONDS
+    policy = captured["payment_policy"]
+    assert policy.expected_recipients == frozenset({DESTINATION})
+    assert policy.max_amount == Decimal("1.25")
+    assert policy.allowed_currencies == frozenset({RLUSD_CURRENCY})
+    assert captured["allow_insecure_localhost"] is True
 
 
-def test_buyer_example_ignores_comment_only_asset_placeholder(monkeypatch) -> None:
-    buyer_example = importlib.import_module("examples.buyer_httpx")
-    buyer_example = importlib.reload(buyer_example)
-
-    signer = buyer_example.XRPLPaymentSigner(
-        Wallet.create(),
-        network="xrpl:1",
-        autofill_enabled=False,
-    )
-    captured: dict[str, object] = {}
-
-    class DummyClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, url: str) -> httpx.Response:
-            return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", url))
-
-    def fake_wrap_httpx_with_mpp_payment(
-        _signer,
-        *,
-        asset=None,
-        transport=None,
-        timeout=None,
-        **_kwargs,
-    ):
-        captured["asset"] = asset
-        captured["transport"] = transport
-        captured["timeout"] = timeout
-        return DummyClient()
-
-    monkeypatch.setenv("PAYMENT_ASSET", "   # buyer-side asset identifier")
-    monkeypatch.setattr(
-        buyer_example,
-        "wrap_httpx_with_mpp_payment",
-        fake_wrap_httpx_with_mpp_payment,
-    )
-
-    response = asyncio.run(
-        buyer_example.fetch_paid_resource(
-            signer=signer,
-            target_url="http://merchant.local/premium",
-        )
-    )
-
-    assert response.status_code == 200
-    assert captured["asset"] is None
-    assert captured["timeout"] == buyer_example.DEFAULT_REQUEST_TIMEOUT_SECONDS
-
-
-def test_buyer_example_uses_mainnet_rpc_fallback_for_non_testnet_network(monkeypatch) -> None:
-    buyer_example = importlib.import_module("examples.buyer_httpx")
-    buyer_example = importlib.reload(buyer_example)
-
-    monkeypatch.delenv("XRPL_RPC_URL", raising=False)
-    monkeypatch.setenv("XRPL_NETWORK", "xrpl:0")
-
-    assert buyer_example.rpc_url_from_env() == buyer_example.DEFAULT_MAINNET_RPC_URL
-
-
-def test_buyer_minimal_example_uses_base_url_asset_and_target_path_from_env(monkeypatch) -> None:
-    buyer_example = importlib.import_module("examples.buyer_minimal")
-    buyer_example = importlib.reload(buyer_example)
-
-    signer = buyer_example.XRPLPaymentSigner(
-        Wallet.create(),
-        network="xrpl:1",
-        autofill_enabled=False,
-    )
-    captured: dict[str, object] = {}
-
-    class DummyClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, path: str) -> httpx.Response:
-            captured["path"] = path
-            return httpx.Response(200, json={"ok": True}, request=httpx.Request("GET", path))
-
-    def fake_wrap_httpx_with_mpp_payment(
-        _signer,
-        *,
-        asset=None,
-        base_url=None,
-        transport=None,
-        **_kwargs,
-    ):
-        captured["asset"] = asset
-        captured["base_url"] = base_url
-        captured["transport"] = transport
-        return DummyClient()
-
-    monkeypatch.setenv("TARGET_BASE_URL", "http://merchant.local")
-    monkeypatch.setenv("TARGET_PATH", "/premium")
-    monkeypatch.setenv("PAYMENT_ASSET", "RLUSD:rRLUSDISSUER")
-    monkeypatch.setattr(
-        buyer_example,
-        "wrap_httpx_with_mpp_payment",
-        fake_wrap_httpx_with_mpp_payment,
-    )
-
-    response = asyncio.run(buyer_example.fetch_premium(signer=signer))
-
-    assert response.status_code == 200
-    assert captured["asset"] == "RLUSD:rRLUSDISSUER"
-    assert captured["base_url"] == "http://merchant.local"
-    assert captured["path"] == "/premium"
-
-
-def test_minimal_examples_round_trip_paid_response(monkeypatch) -> None:
-    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
+def test_buyer_httpx_example_round_trips_with_real_transport_policy(monkeypatch) -> None:
+    monkeypatch.setenv("FACILITATOR_URL", "https://facilitator.example")
     monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
     monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
-    monkeypatch.setenv("XRPL_NETWORK", "xrpl:1")
-    monkeypatch.setenv("PRICE_DROPS", "1000")
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    monkeypatch.setenv("PRICE_AMOUNT", "1000")
+    monkeypatch.setenv("PRICE_CURRENCY", "XRP")
     monkeypatch.setenv("MPP_CHALLENGE_SECRET", CHALLENGE_SECRET)
 
-    seller_example = importlib.import_module("examples.seller_minimal")
-    seller_example = importlib.reload(seller_example)
-    buyer_example = importlib.import_module("examples.buyer_minimal")
-    buyer_example = importlib.reload(buyer_example)
-
-    facilitator_client = FakeFacilitatorClient()
-    seller_app = seller_example.create_app(
-        client_factory=lambda _url, _token: facilitator_client,
+    merchant = importlib.reload(importlib.import_module("examples.merchant_fastapi.app"))
+    buyer = importlib.reload(importlib.import_module("examples.buyer_httpx"))
+    app = merchant.create_app(
+        client_factory=lambda _url, _token: FakeFacilitatorClient()
     )
-    signer = buyer_example.XRPLPaymentSigner(
+    signer = buyer.XRPLPaymentSigner(
         Wallet.create(),
-        network="xrpl:1",
+        network="testnet",
         autofill_enabled=False,
     )
 
-    async def _run() -> httpx.Response:
-        return await buyer_example.fetch_premium(
+    response = asyncio.run(
+        buyer.fetch_paid_resource(
             signer=signer,
-            base_url="http://merchant.local",
-            payment_asset="XRP:native",
-            transport=httpx.ASGITransport(app=seller_app),
+            target_url="http://127.0.0.1/premium",
+            payment_currency="XRP",
+            expected_recipient=DESTINATION,
+            max_payment_amount="1000",
+            transport=httpx.ASGITransport(app=app),
         )
-
-    response = asyncio.run(_run())
+    )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "message": "premium content unlocked",
-        "payer": PAYER,
-        "tx_hash": TX_HASH,
-    }
+    assert response.json()["payer"] == signer.wallet.classic_address
+    assert "Payment-Receipt" in response.headers
 
 
-def test_buyer_example_loads_dotenv_from_current_working_directory(
+def test_minimal_examples_round_trip_mpp_02_charge(monkeypatch) -> None:
+    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
+    monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
+    monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    monkeypatch.setenv("PRICE_AMOUNT", "1000")
+    monkeypatch.setenv("MPP_CHALLENGE_SECRET", CHALLENGE_SECRET)
+
+    seller = importlib.reload(importlib.import_module("examples.seller_minimal"))
+    buyer = importlib.reload(importlib.import_module("examples.buyer_minimal"))
+    app = seller.create_app(client_factory=lambda _url, _token: FakeFacilitatorClient())
+    signer = buyer.XRPLPaymentSigner(
+        Wallet.create(),
+        network="testnet",
+        autofill_enabled=False,
+    )
+
+    response = asyncio.run(
+        buyer.fetch_premium(
+            signer=signer,
+            base_url="http://127.0.0.1",
+            payment_currency="XRP",
+            expected_recipient=DESTINATION,
+            max_payment_amount="1000",
+            transport=httpx.ASGITransport(app=app),
+        )
+    )
+    assert response.status_code == 200
+    response_body = response.json()
+    assert response_body["message"] == "premium content unlocked"
+    assert response_body["payer"] == signer.wallet.classic_address
+    assert len(response_body["tx_hash"]) == 64
+    assert set(response_body["tx_hash"]) <= set("0123456789ABCDEF")
+    assert "Payment-Receipt" in response.headers
+
+
+def test_buyer_example_loads_named_network_and_currency_from_dotenv(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     wallet = Wallet.create()
-    dotenv_path = tmp_path / ".env"
-    dotenv_path.write_text(
+    (tmp_path / ".env").write_text(
         "\n".join(
             [
                 f"XRPL_WALLET_SEED={wallet.seed}",
-                "XRPL_NETWORK=xrpl:0",
+                "XRPL_NETWORK=mainnet",
                 "XRPL_RPC_URL=https://mainnet.example.invalid:51234",
-                "PAYMENT_ASSET=RLUSD:rIssuerFromDotenv",
+                f"PAYMENT_CURRENCY={RLUSD_CURRENCY}",
             ]
         )
         + "\n",
         encoding="utf-8",
     )
-
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("XRPL_WALLET_SEED", raising=False)
-    monkeypatch.delenv("XRPL_NETWORK", raising=False)
-    monkeypatch.delenv("XRPL_RPC_URL", raising=False)
-    monkeypatch.delenv("PAYMENT_ASSET", raising=False)
+    for name in ("XRPL_WALLET_SEED", "XRPL_NETWORK", "XRPL_RPC_URL", "PAYMENT_CURRENCY"):
+        monkeypatch.delenv(name, raising=False)
 
-    buyer_example = importlib.import_module("examples.buyer_httpx")
-    buyer_example = importlib.reload(buyer_example)
-
-    signer = buyer_example.build_signer_from_env()
-
-    assert signer.network == "xrpl:0"
-    assert buyer_example.rpc_url_from_env() == "https://mainnet.example.invalid:51234"
-    assert buyer_example.payment_asset_from_env() == "RLUSD:rIssuerFromDotenv"
+    buyer = importlib.reload(importlib.import_module("examples.buyer_httpx"))
+    signer = buyer.build_signer_from_env()
+    assert signer.network == "mainnet"
+    assert buyer.rpc_url_from_env() == "https://mainnet.example.invalid:51234"
+    assert buyer.payment_currency_from_env() == RLUSD_CURRENCY
 
 
-def test_example_quickstart_flow_returns_paid_response(monkeypatch) -> None:
-    monkeypatch.setenv("FACILITATOR_URL", "http://facilitator.local")
-    monkeypatch.setenv("FACILITATOR_TOKEN", FACILITATOR_TOKEN)
-    monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
-    monkeypatch.setenv("XRPL_NETWORK", "xrpl:1")
-    monkeypatch.setenv("PRICE_DROPS", "1000")
-    monkeypatch.setenv("MPP_CHALLENGE_SECRET", CHALLENGE_SECRET)
+def test_demo_trace_config_converts_operator_xrp_cap_to_drops(monkeypatch) -> None:
+    trace = importlib.reload(importlib.import_module("devtools.demo_trace"))
+    monkeypatch.setenv("XRPL_WALLET_SEED", Wallet.create().seed or "")
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    monkeypatch.setenv("PAYMENT_CURRENCY", "XRP")
+    monkeypatch.setenv("XRPL_MPP_EXPECTED_RECIPIENT", DESTINATION)
+    monkeypatch.setenv("XRPL_MPP_MAX_SPEND", "0.01")
 
-    merchant_example = importlib.import_module("examples.merchant_fastapi.app")
-    merchant_example = importlib.reload(merchant_example)
-    buyer_example = importlib.import_module("examples.buyer_httpx")
-    buyer_example = importlib.reload(buyer_example)
-
-    facilitator_client = FakeFacilitatorClient()
-    merchant_app = merchant_example.create_app(
-        client_factory=lambda _url, _token: facilitator_client,
+    config = trace.resolve_config(
+        env_file=None,
+        target_url="http://127.0.0.1/premium",
+        timeout_seconds=1,
     )
 
-    signer = buyer_example.XRPLPaymentSigner(
-        Wallet.create(),
-        network="xrpl:1",
-        autofill_enabled=False,
-    )
-
-    async def _run() -> httpx.Response:
-        response = await buyer_example.fetch_paid_resource(
-            signer=signer,
-            target_url="http://merchant.local/premium",
-            payment_asset="XRP:native",
-            transport=httpx.ASGITransport(app=merchant_app),
-        )
-        return response
-
-    response = asyncio.run(_run())
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "message": "premium content unlocked",
-        "payer": PAYER,
-        "invoice_id": "A" * 64,
-        "tx_hash": TX_HASH,
-    }
+    assert config.expected_recipient == DESTINATION
+    assert config.max_payment_amount == "10000"
 
 
-def test_demo_trace_renders_recording_friendly_summary(monkeypatch) -> None:
-    demo_trace = importlib.import_module("devtools.demo_trace")
-    demo_trace = importlib.reload(demo_trace)
-
-    buyer_wallet = Wallet.create()
-    signer = demo_trace.XRPLPaymentSigner(
-        buyer_wallet,
-        network="xrpl:1",
-        autofill_enabled=False,
-    )
-    challenge = build_payment_challenge(
+def _charge_challenge(
+    *,
+    header: str | None = None,
+    amount: str = "1.25",
+    recipient: str = DESTINATION,
+) -> object:
+    return build_payment_challenge(
         secret=CHALLENGE_SECRET,
         realm="merchant.example",
         method="xrpl",
         intent="charge",
         request_model=XRPLChargeRequest(
-            amount="1.25",
-            currency=f"RLUSD:{RLUSD_TESTNET_ISSUER}",
-            recipient=DESTINATION,
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 64),
+            amount=amount,
+            currency=RLUSD_CURRENCY,
+            recipient=recipient,
+            methodDetails=XRPLChargeMethodDetails(
+                network="testnet",
+                invoiceId=INVOICE_ID,
+            ),
         ),
         expires_in_seconds=300,
-    )
-    payment_receipt = PaymentReceipt(
-        method="xrpl",
-        timestamp="2026-03-21T12:00:00Z",
-        reference=TX_HASH,
-        challengeId=challenge.id,
-        intent="charge",
-        network="xrpl:1",
-        payer=buyer_wallet.classic_address,
-        recipient=DESTINATION,
-        invoiceId="A" * 64,
-        txHash=TX_HASH,
-        settlementStatus="validated",
-        asset={"code": "RLUSD", "issuer": RLUSD_TESTNET_ISSUER},
-        amount={"value": "1.25", "unit": "issued", "asset": {"code": "RLUSD", "issuer": RLUSD_TESTNET_ISSUER}},
+        header=header,
     )
 
-    balance_snapshots = {
+
+def test_demo_trace_renders_core_receipt_and_canonical_currency(monkeypatch) -> None:
+    trace = importlib.reload(importlib.import_module("devtools.demo_trace"))
+    wallet = Wallet.create()
+    signer = trace.XRPLPaymentSigner(
+        wallet,
+        network="testnet",
+        autofill_enabled=False,
+    )
+    challenge = _charge_challenge(header=PAYMENT_AUTHORIZATION_HEADER)
+    xrp = {
         DESTINATION: [2_000_000, 2_000_000],
-        buyer_wallet.classic_address: [10_000_000, 9_999_988],
+        wallet.classic_address: [10_000_000, 9_999_988],
     }
-    asset_snapshots = {
+    issued = {
         DESTINATION: [Decimal("4"), Decimal("5.25")],
-        buyer_wallet.classic_address: [Decimal("7"), Decimal("5.75")],
+        wallet.classic_address: [Decimal("7"), Decimal("5.75")],
     }
+    monkeypatch.setattr(trace, "get_validated_balance", lambda _c, address: xrp[address].pop(0))
+    monkeypatch.setattr(
+        trace,
+        "get_validated_trustline_balance",
+        lambda _c, address, issuer, *, currency_code: issued[address].pop(0),
+    )
 
-    def fake_get_validated_balance(_client, address: str) -> int:
-        return balance_snapshots[address].pop(0)
+    retry_seen = {"value": False}
 
-    def fake_get_validated_trustline_balance(_client, address: str, issuer: str, *, currency_code: str = "RLUSD") -> Decimal:
-        assert issuer == RLUSD_TESTNET_ISSUER
-        assert currency_code == "RLUSD"
-        return asset_snapshots[address].pop(0)
+    def handler(request: httpx.Request) -> httpx.Response:
+        if PAYMENT_AUTHORIZATION_HEADER not in request.headers:
+            return httpx.Response(
+                402,
+                headers={"WWW-Authenticate": render_payment_challenge(challenge)},
+                request=request,
+            )
+        retry_seen["value"] = True
+        assert "authorization" not in request.headers
+        credential = decode_payment_credential(
+            request.headers[PAYMENT_AUTHORIZATION_HEADER].removeprefix("Payment ")
+        )
+        payload = decode_charge_payload(credential)
+        assert payload.type == "transaction"
+        transaction = Payment.from_xrpl(binarycodec.decode(payload.blob))
+        reference = transaction.get_hash().upper()
+        receipt = PaymentReceipt(
+            status="success",
+            method="xrpl",
+            timestamp="2026-03-21T12:00:00Z",
+            reference=reference,
+            challengeId=challenge.id,
+            network="testnet",
+            payer=wallet.classic_address,
+            recipient=DESTINATION,
+            invoiceId=INVOICE_ID,
+            txHash=reference,
+            settlementStatus="validated",
+        )
+        return httpx.Response(
+            200,
+            json={"message": "premium content unlocked"},
+            headers={"Payment-Receipt": encode_payment_receipt(receipt)},
+            request=request,
+        )
+
+    result = asyncio.run(
+        trace.run_demo_trace(
+            signer=signer,
+            rpc_client=object(),
+            target_url="http://127.0.0.1/premium",
+            payment_currency=RLUSD_CURRENCY,
+            expected_recipient=DESTINATION,
+            max_payment_amount="1.25",
+            transport=httpx.MockTransport(handler),
+        )
+    )
+    output = trace.render_trace(result)
+    assert retry_seen["value"] is True
+    assert result.payment_receipt is not None
+    assert "amount: 1.25 RLUSD" in output
+    assert f"invoice id: {INVOICE_ID}" in output
+    assert f"tx hash: {result.payment_receipt.reference}" in output
+    assert "MPP payment receipt" in output
+
+
+def test_demo_trace_rejects_challenge_outside_operator_policy(monkeypatch) -> None:
+    trace = importlib.reload(importlib.import_module("devtools.demo_trace"))
+    signer = trace.XRPLPaymentSigner(
+        Wallet.create(),
+        network="testnet",
+        autofill_enabled=False,
+    )
+    challenge = _charge_challenge(amount="1.25")
+    monkeypatch.setattr(
+        trace,
+        "snapshot_wallet",
+        lambda *_args, **_kwargs: pytest.fail("policy must run before wallet inspection"),
+    )
+
+    with pytest.raises(PaymentPolicyError, match="exceeds"):
+        asyncio.run(
+            trace.run_demo_trace(
+                signer=signer,
+                rpc_client=object(),
+                target_url="http://127.0.0.1/premium",
+                payment_currency=RLUSD_CURRENCY,
+                expected_recipient=DESTINATION,
+                max_payment_amount="1.00",
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        402,
+                        headers={
+                            "WWW-Authenticate": render_payment_challenge(challenge)
+                        },
+                        request=request,
+                    )
+                ),
+            )
+        )
+
+
+def test_demo_trace_rejects_forged_receipt_reference(monkeypatch) -> None:
+    trace = importlib.reload(importlib.import_module("devtools.demo_trace"))
+    wallet = Wallet.create()
+    signer = trace.XRPLPaymentSigner(
+        wallet,
+        network="testnet",
+        autofill_enabled=False,
+    )
+    challenge = _charge_challenge()
+    xrp = {DESTINATION: 2_000_000, wallet.classic_address: 10_000_000}
+    issued = {DESTINATION: Decimal("5"), wallet.classic_address: Decimal("5")}
+    monkeypatch.setattr(trace, "get_validated_balance", lambda _c, address: xrp[address])
+    monkeypatch.setattr(
+        trace,
+        "get_validated_trustline_balance",
+        lambda _c, address, _issuer, *, currency_code: issued[address],
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "authorization" not in request.headers:
@@ -462,118 +512,178 @@ def test_demo_trace_renders_recording_friendly_summary(monkeypatch) -> None:
                 headers={"WWW-Authenticate": render_payment_challenge(challenge)},
                 request=request,
             )
+        forged = PaymentReceipt(
+            status="success",
+            method="xrpl",
+            timestamp="2026-03-21T12:00:00Z",
+            reference=TX_HASH,
+        )
         return httpx.Response(
             200,
-                json={
-                    "message": "premium content unlocked",
-                    "payer": buyer_wallet.classic_address,
-                    "invoice_id": "A" * 64,
-                    "tx_hash": TX_HASH,
-                },
-            headers={"Payment-Receipt": encode_payment_receipt(payment_receipt)},
+            headers={"Payment-Receipt": encode_payment_receipt(forged)},
             request=request,
         )
 
-    monkeypatch.setattr(demo_trace, "get_validated_balance", fake_get_validated_balance)
-    monkeypatch.setattr(
-        demo_trace,
-        "get_validated_trustline_balance",
-        fake_get_validated_trustline_balance,
-    )
-
-    result = asyncio.run(
-        demo_trace.run_demo_trace(
+    with pytest.raises(ValueError, match="reference does not match"):
+        asyncio.run(
+            trace.run_demo_trace(
                 signer=signer,
                 rpc_client=object(),
-                target_url="http://merchant.local/premium",
-                payment_asset=f"RLUSD:{RLUSD_TESTNET_ISSUER}",
-                timeout_seconds=1.0,
+                target_url="http://127.0.0.1/premium",
+                payment_currency=RLUSD_CURRENCY,
+                expected_recipient=DESTINATION,
+                max_payment_amount="1.25",
                 transport=httpx.MockTransport(handler),
             )
-    )
-
-    output = demo_trace.render_trace(result)
-    assert result.challenge.intent == "charge"
-    assert result.payment_receipt is not None
-    assert result.payment_receipt.tx_hash == TX_HASH
-    assert "MPP payment challenge" in output
-    assert "MPP payment receipt" in output
-    assert "amount: 1.25 RLUSD" in output
-    assert f"invoice id: {'A' * 32}" in output
-    assert f"tx hash: {TX_HASH}" in output
+        )
 
 
-def test_demo_trace_blocks_unfunded_issued_asset_buyer(monkeypatch) -> None:
-    demo_trace = importlib.import_module("devtools.demo_trace")
-    demo_trace = importlib.reload(demo_trace)
-
-    buyer_wallet = Wallet.create()
-    signer = demo_trace.XRPLPaymentSigner(
-        buyer_wallet,
-        network="xrpl:1",
+def test_demo_trace_blocks_unfunded_issued_currency(monkeypatch) -> None:
+    trace = importlib.reload(importlib.import_module("devtools.demo_trace"))
+    wallet = Wallet.create()
+    signer = trace.XRPLPaymentSigner(
+        wallet,
+        network="testnet",
         autofill_enabled=False,
     )
-    challenge = build_payment_challenge(
+    challenge = _charge_challenge()
+    xrp = {DESTINATION: 2_000_000, wallet.classic_address: 10_000_000}
+    issued = {DESTINATION: Decimal("30"), wallet.classic_address: Decimal("0")}
+    monkeypatch.setattr(trace, "get_validated_balance", lambda _c, address: xrp[address])
+    monkeypatch.setattr(
+        trace,
+        "get_validated_trustline_balance",
+        lambda _c, address, _issuer, *, currency_code: issued[address],
+    )
+
+    with pytest.raises(trace.DemoPreflightError, match="only has 0 RLUSD"):
+        asyncio.run(
+            trace.run_demo_trace(
+                signer=signer,
+                rpc_client=object(),
+                target_url="http://127.0.0.1/premium",
+                payment_currency=RLUSD_CURRENCY,
+                expected_recipient=DESTINATION,
+                max_payment_amount="1.25",
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        402,
+                        headers={"WWW-Authenticate": render_payment_challenge(challenge)},
+                        request=request,
+                    )
+                ),
+            )
+        )
+
+
+def _session_challenge(*, path: str, amount: str, channel_id: str, cumulative: str | None):
+    return build_payment_challenge(
         secret=CHALLENGE_SECRET,
         realm="merchant.example",
         method="xrpl",
-        intent="charge",
-        request_model=XRPLChargeRequest(
-            amount="1.25",
-            currency=f"RLUSD:{RLUSD_TESTNET_ISSUER}",
+        intent="session",
+        request_model=XRPLSessionRequest(
+            amount=amount,
+            currency="XRP",
+            channelId=channel_id,
             recipient=DESTINATION,
-            methodDetails=XRPLChargeMethodDetails(network="xrpl:1", invoiceId="A" * 32),
+            methodDetails=XRPLSessionMethodDetails(
+                network="testnet",
+                cumulativeAmount=cumulative,
+            ),
         ),
         expires_in_seconds=300,
     )
 
-    xrp_balances = {
-        DESTINATION: 2_000_000,
-        buyer_wallet.classic_address: 10_000_000,
-    }
-    rlusd_balances = {
-        DESTINATION: Decimal("30"),
-        buyer_wallet.classic_address: Decimal("0"),
-    }
-    printed_sections: list[str] = []
 
-    def fake_get_validated_balance(_client, address: str) -> int:
-        return xrp_balances[address]
-
-    def fake_get_validated_trustline_balance(_client, address: str, issuer: str, *, currency_code: str = "RLUSD") -> Decimal:
-        assert issuer == RLUSD_TESTNET_ISSUER
-        assert currency_code == "RLUSD"
-        return rlusd_balances[address]
+def test_paychannel_example_runs_open_voucher_voucher_close() -> None:
+    buyer = importlib.reload(importlib.import_module("examples.buyer_paychannel"))
+    signer = buyer.XRPLPaymentSigner(
+        Wallet.create(),
+        network="testnet",
+        autofill_enabled=False,
+        expected_recipient=DESTINATION,
+        allowed_currencies={"XRP"},
+    )
+    cumulative = {"value": 0}
+    channel = {"value": ""}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if "authorization" not in request.headers:
+            if path == "/channel/open":
+                challenge = _session_challenge(
+                    path=path,
+                    amount="0",
+                    channel_id="",
+                    cumulative=None,
+                )
+            elif path == "/metered":
+                challenge = _session_challenge(
+                    path=path,
+                    amount="250",
+                    channel_id=channel["value"],
+                    cumulative=str(cumulative["value"]),
+                )
+            else:
+                challenge = _session_challenge(
+                    path=path,
+                    amount="0",
+                    channel_id=channel["value"],
+                    cumulative=str(cumulative["value"]),
+                )
+            return httpx.Response(
+                402,
+                headers={"WWW-Authenticate": render_payment_challenge(challenge)},
+                request=request,
+            )
+
+        credential = decode_payment_credential(
+            request.headers["authorization"].removeprefix("Payment ")
+        )
+        payload = decode_session_payload(credential)
+        if path == "/channel/open":
+            binding = derive_paychannel_open_binding(payload.transaction)
+            channel["value"] = binding.channel_id
+            reference = f"open:{binding.channel_id}:{binding.tx_hash}"
+        else:
+            cumulative["value"] = int(payload.amount)
+            reference = f"{channel['value']}:{payload.amount}"
+        receipt = PaymentReceipt(
+            status="success",
+            method="xrpl",
+            timestamp="2026-03-21T12:00:00Z",
+            reference=reference,
+        )
         return httpx.Response(
-            402,
-            headers={"WWW-Authenticate": render_payment_challenge(challenge)},
+            200,
+            headers={"Payment-Receipt": encode_payment_receipt(receipt)},
             request=request,
         )
 
-    monkeypatch.setattr(demo_trace, "get_validated_balance", fake_get_validated_balance)
-    monkeypatch.setattr(
-        demo_trace,
-        "get_validated_trustline_balance",
-        fake_get_validated_trustline_balance,
-    )
-
-    with pytest.raises(
-        demo_trace.DemoPreflightError,
-        match="Buyer wallet .* only has 0 RLUSD",
-    ):
-        asyncio.run(
-            demo_trace.run_demo_trace(
-                signer=signer,
-                rpc_client=object(),
-                target_url="http://merchant.local/premium",
-                payment_asset=f"RLUSD:{RLUSD_TESTNET_ISSUER}",
-                timeout_seconds=1.0,
-                transport=httpx.MockTransport(handler),
-                printer=printed_sections.append,
-            )
+    receipts = asyncio.run(
+        buyer.run_paychannel_flow(
+            signer=signer,
+            merchant_address=DESTINATION,
+            target_base_url="http://127.0.0.1",
+            funding_drops="1000000",
+            request_count=2,
+            transport=httpx.MockTransport(handler),
         )
+    )
+    assert len(receipts) == 4
+    assert receipts[0].reference.startswith(f"open:{channel['value']}:")
+    assert [receipt.reference for receipt in receipts[1:]] == [
+        f"{channel['value']}:250",
+        f"{channel['value']}:500",
+        f"{channel['value']}:500",
+    ]
 
-    assert any("Preflight check" in section for section in printed_sections)
-    assert any("python -m devtools.rlusd_topup" in section for section in printed_sections)
+
+def test_paychannel_seller_uses_zero_cost_lifecycle_and_cumulative_unit(monkeypatch) -> None:
+    monkeypatch.setenv("MERCHANT_XRPL_ADDRESS", DESTINATION)
+    monkeypatch.setenv("XRPL_NETWORK", "testnet")
+    monkeypatch.setenv("SESSION_UNIT_DROPS", "250")
+    seller = importlib.reload(importlib.import_module("examples.seller_paychannel"))
+    assert seller._session_route(amount=0, description="open").session_options[0].amount == "0"
+    assert seller._session_route(amount=250, description="unit").session_options[0].amount == "250"

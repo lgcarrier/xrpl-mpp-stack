@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from fastapi import FastAPI, Request
 
-from xrpl_mpp_core import getenv_clean
-from xrpl_mpp_middleware import PaymentMiddlewareASGI, RouteConfig, require_payment
+from examples._facilitator import allow_insecure_loopback_facilitator
+from xrpl_mpp_core import getenv_clean, parse_currency
+from xrpl_mpp_middleware import ChargeRouteSpec, PaymentMiddlewareASGI, RouteConfig
 
 DEFAULT_FACILITATOR_URL = "http://127.0.0.1:8000"
 DEFAULT_FACILITATOR_TOKEN = "replace-with-your-facilitator-token"
 DEFAULT_MERCHANT_XRPL_ADDRESS = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
-DEFAULT_XRPL_NETWORK = "xrpl:1"
-DEFAULT_PRICE_DROPS = 1000
+DEFAULT_XRPL_NETWORK = "testnet"
+DEFAULT_PRICE_AMOUNT = "1000"
+DEFAULT_PRICE_CURRENCY = "XRP"
 DEFAULT_MPP_CHALLENGE_SECRET = "replace-with-a-long-random-secret"
 
 
@@ -37,20 +39,17 @@ def mpp_default_realm_from_env() -> str | None:
     return getenv_clean("MPP_DEFAULT_REALM")
 
 
-def price_drops_from_env() -> int:
-    return int(getenv_clean("PRICE_DROPS", str(DEFAULT_PRICE_DROPS)) or DEFAULT_PRICE_DROPS)
+def price_amount_from_env() -> str:
+    return getenv_clean("PRICE_AMOUNT", DEFAULT_PRICE_AMOUNT) or DEFAULT_PRICE_AMOUNT
 
 
-def price_asset_code_from_env() -> str:
-    return (getenv_clean("PRICE_ASSET_CODE", "XRP") or "XRP").upper()
-
-
-def price_asset_issuer_from_env() -> str | None:
-    return getenv_clean("PRICE_ASSET_ISSUER")
-
-
-def price_asset_amount_from_env() -> str | None:
-    return getenv_clean("PRICE_ASSET_AMOUNT")
+def price_currency_from_env() -> str:
+    currency = (
+        getenv_clean("PRICE_CURRENCY", DEFAULT_PRICE_CURRENCY)
+        or DEFAULT_PRICE_CURRENCY
+    )
+    parse_currency(currency)
+    return currency
 
 
 def build_premium_route_config() -> RouteConfig:
@@ -58,44 +57,26 @@ def build_premium_route_config() -> RouteConfig:
     facilitator_token = facilitator_token_from_env()
     merchant_xrpl_address = merchant_xrpl_address_from_env()
     xrpl_network = xrpl_network_from_env()
-    price_drops = price_drops_from_env()
-    price_asset_code = price_asset_code_from_env()
-    price_asset_issuer = price_asset_issuer_from_env()
-    price_asset_amount = price_asset_amount_from_env()
+    price_amount = price_amount_from_env()
+    price_currency = price_currency_from_env()
+    description = "One premium XRPL MPP 0.2 charge"
 
-    uses_issued_asset = (
-        price_asset_code != "XRP"
-        or price_asset_issuer is not None
-        or price_asset_amount is not None
-    )
-    if not uses_issued_asset:
-        return require_payment(
-            facilitator_url=facilitator_url,
-            bearer_token=facilitator_token,
-            pay_to=merchant_xrpl_address,
-            network=xrpl_network,
-            xrp_drops=price_drops,
-            description="One premium XRPL MPP request",
-        )
-
-    if price_asset_code == "XRP":
-        raise RuntimeError(
-            "Issued-asset pricing requires PRICE_ASSET_CODE to be set to a non-XRP asset"
-        )
-    if price_asset_issuer is None:
-        raise RuntimeError("Issued-asset pricing requires PRICE_ASSET_ISSUER")
-    if price_asset_amount is None:
-        raise RuntimeError("Issued-asset pricing requires PRICE_ASSET_AMOUNT")
-
-    return require_payment(
-        facilitator_url=facilitator_url,
-        bearer_token=facilitator_token,
-        pay_to=merchant_xrpl_address,
-        network=xrpl_network,
-        amount=price_asset_amount,
-        asset_code=price_asset_code,
-        asset_issuer=price_asset_issuer,
-        description=f"One premium {price_asset_code} XRPL MPP request",
+    return RouteConfig(
+        facilitatorUrl=facilitator_url,
+        bearerToken=facilitator_token,
+        allowInsecureFacilitatorHttp=allow_insecure_loopback_facilitator(
+            facilitator_url
+        ),
+        chargeOptions=[
+            ChargeRouteSpec(
+                network=xrpl_network,
+                recipient=merchant_xrpl_address,
+                amount=price_amount,
+                currency=price_currency,
+                description=description,
+            )
+        ],
+        description=description,
     )
 
 

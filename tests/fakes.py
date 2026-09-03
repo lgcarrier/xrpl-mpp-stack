@@ -39,13 +39,50 @@ class FakeRedis:
         self._purge_expired()
         return [self._get_string_value(key) for key in keys]
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> bool:
+    async def get(self, key: str) -> str | None:
         self._purge_expired()
+        return self._get_string_value(key)
+
+    async def set(
+        self,
+        key: str,
+        value: str,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool:
+        self._purge_expired()
+        if nx and key in self._strings:
+            return False
         self._strings[key] = _StringRecord(
             value=value,
             expires_at=self._expires_at(ex),
         )
         return True
+
+    async def scan(
+        self,
+        *,
+        cursor: int,
+        match: str,
+        count: int,
+    ) -> tuple[int, list[str]]:
+        self._purge_expired()
+        prefix = match.removesuffix("*")
+        keys = sorted(key for key in self._strings if key.startswith(prefix))
+        end = min(len(keys), cursor + count)
+        return (0 if end >= len(keys) else end, keys[cursor:end])
+
+    async def eval(
+        self,
+        _script: str,
+        _key_count: int,
+        key: str,
+        expected: str,
+    ) -> int:
+        self._purge_expired()
+        if self._get_string_value(key) != expected:
+            return 0
+        return await self.delete(key)
 
     async def delete(self, key: str) -> int:
         self._purge_expired()
@@ -152,6 +189,13 @@ class FakeRedisPipeline:
 
     async def mget(self, *keys: str) -> list[str | None]:
         return await self._redis.mget(*keys)
+
+    async def get(self, key: str) -> str | None:
+        return await self._redis.get(key)
+
+    async def unwatch(self) -> None:
+        self._watched_keys = ()
+        self._watched_values = {}
 
     def multi(self) -> None:
         self._commands = []

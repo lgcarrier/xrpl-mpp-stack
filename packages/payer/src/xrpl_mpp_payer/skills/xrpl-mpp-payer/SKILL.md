@@ -15,7 +15,20 @@ That installs this skill into `~/.agents/skills/xrpl-mpp-payer/SKILL.md`.
 Use the CLI for one-off requests:
 
 ```bash
-xrpl-mpp pay https://merchant.example/premium --amount 0.001 --asset XRP
+xrpl-mpp pay https://merchant.example/premium \
+  --amount 0.001 \
+  --asset XRP \
+  --recipient rYourApprovedMerchantAddress
+```
+
+For a PayChannel, explicitly select `session`. Supply
+`--channel-funding-amount` for an open challenge or the ledger
+`--channel-id` plus its last cumulative amount for a voucher. Close with:
+
+```bash
+xrpl-mpp close https://merchant.example/metered \
+  --channel-id AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+  --cumulative-amount 50000
 ```
 
 Use the local forward proxy when repeated requests should auto-pay:
@@ -24,7 +37,7 @@ Use the local forward proxy when repeated requests should auto-pay:
 xrpl-mpp proxy https://merchant.example --port 8787
 ```
 
-## Native MCP Mode (Claude Desktop / Cursor)
+## Payer Agent MCP Mode (Claude Desktop / Cursor)
 
 ```bash
 pip install "xrpl-mpp-payer[mcp]"
@@ -38,4 +51,9 @@ Claude Desktop can add the server directly:
 claude mcp add xrpl-mpp-payer -- xrpl-mpp mcp
 ```
 
-Agents can call `pay_url` directly in MCP mode without shelling out to the CLI.
+Agents can call `pay_url` for charge, open, or voucher flows and
+`close_channel` for the final cumulative voucher. Use named networks and MPP
+0.2 currency strings only. Never send legacy prepaid session tokens, `use`, or
+`top_up` actions. Always supply `expected_recipient` (or configure
+`XRPL_MPP_EXPECTED_RECIPIENT`) before automatic signing; never infer it from
+the untrusted 402 challenge.

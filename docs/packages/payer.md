@@ -1,79 +1,59 @@
-# Payer
+# `xrpl-mpp-payer`
 
-`xrpl-mpp-payer` is the operator-facing runtime for paying protected MPP resources.
-
-## Use It When
-
-Use this package when you want a ready-made buyer:
-
-- a CLI for manual payments and previews
-- a local proxy that auto-pays upstream protected routes
-- a local receipt store and spend-budget guardrails
-- an MCP bridge for agent tooling
-
-## Install
+Install:
 
 ```bash
 pip install xrpl-mpp-payer
+xrpl-mpp --help
 ```
 
-For MCP support:
+Install and run the optional payer agent server with:
 
 ```bash
 pip install "xrpl-mpp-payer[mcp]"
-```
-
-## Commands
-
-Commands:
-
-- `xrpl-mpp pay`
-- `xrpl-mpp proxy`
-- `xrpl-mpp receipts`
-- `xrpl-mpp budget`
-- `xrpl-mpp skill install`
-- `xrpl-mpp mcp`
-
-Receipts are stored locally and spend caps are controlled with `XRPL_MPP_MAX_SPEND`.
-
-## Common Usage
-
-```bash
-xrpl-mpp pay https://merchant.example/premium --amount 0.001 --asset XRP
-xrpl-mpp pay https://merchant.example/premium --dry-run
-xrpl-mpp proxy https://merchant.example --port 8787
-xrpl-mpp receipts --limit 20
-xrpl-mpp budget --asset XRP
-```
-
-Use `--dry-run` when you want to confirm that a route exposes a valid MPP challenge
-before allowing the payer to sign and retry automatically.
-
-## Environment
-
-The payer reads:
-
-- `XRPL_WALLET_SEED` for real payments
-- `XRPL_RPC_URL` for the buyer JSON-RPC endpoint
-- `XRPL_NETWORK` for challenge matching and signing
-- `XRPL_MPP_MAX_SPEND` for default budget enforcement
-- `XRPL_MPP_RECEIPTS_PATH` for receipt-store location overrides
-
-If no network is configured, the payer falls back to `xrpl:1`, which makes it
-friendly for local Testnet demos but should be set explicitly for production use.
-
-## MCP And Agent Tooling
-
-```bash
-xrpl-mpp skill install
 xrpl-mpp mcp
 ```
 
-Claude Desktop can register it directly:
+The payer package wraps the client SDK for operators and agents. It provides a
+CLI, local auto-pay proxy, spend policy, and local receipt history.
+
+Typical commands include:
 
 ```bash
-claude mcp add xrpl-mpp-payer -- xrpl-mpp mcp
+export XRPL_MPP_EXPECTED_RECIPIENT=rYourApprovedMerchantAddress
+xrpl-mpp pay https://merchant.example/premium --dry-run
+xrpl-mpp proxy https://merchant.example --port 8787
+xrpl-mpp receipts
+xrpl-mpp budget
 ```
 
-This is the shortest path to giving local agents a safe XRPL-backed payment bridge
-without teaching them your application-specific buyer code.
+Use environment variables or a secret manager for the wallet seed, trusted
+network/RPC endpoint, allowed recipient and currency, and spend cap. Dry-run
+mode is the safest way to inspect a challenge before enabling signing.
+
+Automatic signing fails closed until the operator supplies an approved
+recipient with `--recipient` or `XRPL_MPP_EXPECTED_RECIPIENT`. The value is a
+policy input, not a default copied from the challenge. Apply
+`XRPL_MPP_MAX_SPEND` as a second independent ceiling for unattended use.
+
+The `close` command sends a final cumulative voucher. It does not perform the
+funder's on-ledger `tfClose` transaction or refund unused channel funding.
+
+## Agent integration
+
+The payer's optional agent server is an operational wrapper around buyer
+behavior. The standalone `xrpl-mpp-mcp` package is the protocol implementation
+for native MPP metadata inside an MCP server. They solve different problems:
+
+- use `xrpl-mpp-payer` to give an agent a controlled payer capability;
+- use `xrpl-mpp-mcp` to make an MCP operation itself payment-aware.
+
+Never grant an agent an unlimited funded wallet. Apply recipient, currency,
+network, and spend limits outside model-generated arguments as well as inside
+the payer.
+
+The payer agent tools do not expose recipient or spend-cap overrides to the
+model. Non-dry-run `pay_url`, `close_channel`, and `proxy_mode` require
+`XRPL_MPP_EXPECTED_RECIPIENT` and `XRPL_MPP_MAX_SPEND` in operator-controlled
+process configuration. The environment value is an independent ceiling and
+cannot be raised by a tool call.

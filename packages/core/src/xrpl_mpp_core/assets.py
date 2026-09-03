@@ -16,12 +16,12 @@ USDC_TESTNET_ISSUER = "rHuGNhqTG32mfmAvWA8hUyWRLV3tCSwKQt"
 TF_PARTIAL_PAYMENT = 0x00020000
 
 NETWORK_RLUSD_ISSUERS = {
-    "xrpl:0": RLUSD_MAINNET_ISSUER,
-    "xrpl:1": RLUSD_TESTNET_ISSUER,
+    "mainnet": RLUSD_MAINNET_ISSUER,
+    "testnet": RLUSD_TESTNET_ISSUER,
 }
 NETWORK_USDC_ISSUERS = {
-    "xrpl:0": USDC_MAINNET_ISSUER,
-    "xrpl:1": USDC_TESTNET_ISSUER,
+    "mainnet": USDC_MAINNET_ISSUER,
+    "testnet": USDC_TESTNET_ISSUER,
 }
 
 _XRP_DROPS_PER_XRP = Decimal("1000000")
@@ -32,6 +32,7 @@ _HEX_DIGITS = frozenset(string.hexdigits)
 class AssetKey:
     code: str
     issuer: str | None = None
+    mpt_issuance_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,27 +121,6 @@ def supported_asset_keys(network_id: str, raw_assets: str) -> list[AssetKey]:
     return supported_assets
 
 
-def asset_identifier_from_parts(code: str, issuer: str | None = None) -> str:
-    normalized_code = normalize_currency_code(code)
-    if issuer is None:
-        return f"{normalized_code}:native"
-    return f"{normalized_code}:{issuer.strip()}"
-
-
-def parse_asset_identifier(identifier: str) -> AssetKey:
-    code, separator, issuer = identifier.partition(":")
-    normalized_code = normalize_currency_code(code)
-    if not separator:
-        raise ValueError("Asset identifier must use CODE:ISSUER or CODE:native")
-
-    normalized_issuer = issuer.strip()
-    if normalized_issuer == "native":
-        return AssetKey(code=normalized_code, issuer=None)
-    if not normalized_issuer:
-        raise ValueError("Asset identifier issuer is required")
-    return AssetKey(code=normalized_code, issuer=normalized_issuer)
-
-
 def format_decimal(value: Decimal) -> str:
     rendered = format(value.normalize(), "f")
     if "." in rendered:
@@ -152,4 +132,6 @@ def format_amount(amount: NormalizedAmount) -> str:
     if amount.drops is not None:
         xrp_value = Decimal(amount.drops) / _XRP_DROPS_PER_XRP
         return f"{format_decimal(xrp_value)} {XRP_CODE}"
+    if amount.asset.mpt_issuance_id is not None:
+        return f"{format_decimal(amount.value)} MPT:{amount.asset.mpt_issuance_id}"
     return f"{format_decimal(amount.value)} {amount.asset.code}"

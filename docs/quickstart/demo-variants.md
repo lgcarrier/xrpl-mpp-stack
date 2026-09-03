@@ -1,122 +1,59 @@
-# Run Demo Variants
+# Demo variants
 
-This page is the fastest way to run the three supported demo variants from one place:
+Use the XRP Testnet quickstart first. Issued currencies and Payment Channels add
+ledger prerequisites that can obscure HTTP integration mistakes.
 
-- XRP
-- RLUSD
-- USDC
+## One-time charge variants
 
-If you have not generated the base quickstart env yet, start with
-[Guided Quickstart: Testnet XRP](testnet-xrp.md).
+| Variant | Currency wire value | Extra prerequisite |
+| --- | --- | --- |
+| XRP | `XRP` | Funded payer account |
+| Issued currency | `{"currency":"...","issuer":"r..."}` | Payer trust line and balance; facilitator allowlist |
+| MPT | `{"mpt_issuance_id":"..."}` | Holder balance; facilitator issuance-ID allowlist |
 
-## One-Time Setup
+The JSON descriptor is itself the MPP `currency` string. Build it with the core
+serializer instead of hand-ordering or whitespace-formatting JSON.
 
-Create the base quickstart env and wallet cache:
+## PaymentChannel session
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-python -m devtools.quickstart
-```
+PaymentChannel sessions currently use XRP. A session test needs:
 
-That writes `.env.quickstart` and caches dedicated buyer wallets for XRP, RLUSD,
-and USDC.
+1. a payer wallet and public signing key accepted by the facilitator;
+2. a signed `PaymentChannelCreate` transaction matching payer, recipient,
+   amount, and network;
+3. storage of the resulting channel ID;
+4. signed cumulative claims that strictly increase;
+5. optional recipient redemption and separate funder close handling.
 
-## Demo Matrix
+The cumulative value is the total channel claim. If the last accepted claim is
+`1000` drops and the next request costs `250`, the next claim is `1250`, not
+`250`.
 
-| Demo | Base helper | Derived env file | Buyer asset | Extra prep |
-| --- | --- | --- | --- | --- |
-| XRP | `python -m devtools.quickstart` | `.env.quickstart` | `XRP:native` | None |
-| RLUSD | `python -m devtools.demo_env --asset rlusd` | `.env.quickstart.rlusd` | `RLUSD:<issuer>` | Run `python -m devtools.rlusd_topup` first |
-| USDC | `python -m devtools.demo_env --asset usdc` | `.env.quickstart.usdc` | `USDC:<issuer>` | Run `python -m devtools.usdc_topup` first |
+The channel can also be opened outside MPP and imported from validated ledger
+state on its first voucher/close. Top up with the XRPL
+`PaymentChannelFund` transaction, not an MPP action; a later voucher causes the
+facilitator to verify and adopt the increased funding.
 
-## XRP Demo
+MPP `close` is a final voucher. With `PAYCHANNEL_RECIPIENT_SEED`, the facilitator
+can redeem that voucher on-ledger; without it, the voucher remains off-ledger
+for a separate redemption process. Recipient redemption does not set `tfClose`
+or refund unused funding. The funder must close the XRPL channel separately.
+For unattended operation, prefer an injected KMS/HSM `RecipientSigner`; the
+local seed adapter can optionally run the bounded Redis-leased redemption and
+idle-finalization worker.
 
-Use the base quickstart env directly:
+## Pull versus push charge
 
-```bash
-docker compose --env-file .env.quickstart up --build
-docker compose --env-file .env.quickstart --profile demo run --rm buyer
-```
+- **Pull:** the credential contains the signed transaction blob and the
+  facilitator submits it after exact validation.
+- **Push:** the payer submits first and the credential contains the transaction
+  hash; the facilitator resolves and validates it.
 
-Expected result:
+Use pull for the simplest controlled demo. Use push only when the payer needs
+submission control and can wait for the transaction to be discoverable.
 
-```text
-status=200
-{"message":"premium content unlocked", ...}
-```
+## MCP transport demo
 
-## RLUSD Demo
-
-First, prepare RLUSD:
-
-```bash
-export TRYRLUSD_SESSION_TOKEN=...
-python -m devtools.rlusd_topup
-```
-
-Then generate the derived env and run the stack:
-
-```bash
-python -m devtools.demo_env --asset rlusd
-docker compose --env-file .env.quickstart.rlusd up --build
-docker compose --env-file .env.quickstart.rlusd --profile demo run --rm buyer
-```
-
-That derived env file updates:
-
-- `PRICE_ASSET_CODE`
-- `PRICE_ASSET_ISSUER`
-- `PRICE_ASSET_AMOUNT`
-- `PAYMENT_ASSET`
-- `XRPL_WALLET_SEED`
-- `ALLOWED_ISSUED_ASSETS` when a non-built-in issuer is used
-
-For faucet and claim-recovery details, see [RLUSD Guide](../asset-guides/rlusd.md).
-
-## USDC Demo
-
-First, prepare USDC:
-
-```bash
-python -m devtools.usdc_topup
-```
-
-If the helper asks for a manual Circle faucet claim, complete that first and rerun the helper.
-
-Then generate the derived env and run the stack:
-
-```bash
-python -m devtools.demo_env --asset usdc
-docker compose --env-file .env.quickstart.usdc up --build
-docker compose --env-file .env.quickstart.usdc --profile demo run --rm buyer
-```
-
-For faucet and sweep details, see [USDC Guide](../asset-guides/usdc.md).
-
-## Optional Trace And Agent Modes
-
-To watch the demo buyer trace inside Docker:
-
-```bash
-docker compose --env-file .env.quickstart --profile demo run --rm buyer
-```
-
-To run the MCP bridge instead:
-
-```bash
-docker compose --env-file .env.quickstart --profile buyer-agent-mcp up --build buyer-agent-mcp
-```
-
-## Cleanup
-
-Stop the stack:
-
-```bash
-docker compose --env-file .env.quickstart down
-docker compose --env-file .env.quickstart.rlusd down
-docker compose --env-file .env.quickstart.usdc down
-```
-
-You can reuse the generated env files and cached buyer wallets between runs.
+Native MCP payment metadata is exercised with `xrpl-mpp-mcp`. It uses `_meta`
+instead of HTTP headers. Keep this separate from an HTTP proxy demo so the
+transport boundary is unambiguous.

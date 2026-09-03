@@ -6,7 +6,7 @@ import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGES_DIR = REPO_ROOT / "packages"
-PACKAGE_DIRS = ("core", "facilitator", "middleware", "client", "payer")
+PACKAGE_DIRS = ("core", "facilitator", "middleware", "client", "payer", "mcp")
 
 
 def test_each_package_has_editable_build_metadata() -> None:
@@ -18,6 +18,12 @@ def test_each_package_has_editable_build_metadata() -> None:
 
         assert pyproject["build-system"]["build-backend"] == "hatchling.build"
         assert "editables>=0.5" in pyproject["build-system"]["requires"]
+        hatchling_requirement = next(
+            requirement
+            for requirement in pyproject["build-system"]["requires"]
+            if requirement.startswith("hatchling")
+        )
+        assert "<1.32" in hatchling_requirement
         assert pyproject["project"]["name"].startswith("xrpl-mpp-")
 
 
@@ -39,3 +45,47 @@ def test_each_package_exposes_pypi_project_urls() -> None:
         assert urls["Source"].endswith(f"/packages/{package_dir}")
         assert urls["Issues"].endswith("/issues")
         assert urls["Changelog"].endswith("/blob/main/CHANGELOG.md")
+
+
+def test_each_wheel_uses_distribution_scoped_pep639_license_metadata() -> None:
+    for package_dir in PACKAGE_DIRS:
+        package_path = PACKAGES_DIR / package_dir
+        pyproject = tomllib.loads(
+            (package_path / "pyproject.toml").read_text(encoding="utf-8")
+        )
+
+        assert pyproject["project"]["license-files"] == ["LICENSE"]
+        assert (package_path / "LICENSE").read_text(encoding="utf-8") == (
+            REPO_ROOT / "LICENSE"
+        ).read_text(encoding="utf-8")
+        wheel = pyproject.get("tool", {}).get("hatch", {}).get("build", {}).get(
+            "targets", {}
+        ).get("wheel", {})
+        assert "force-include" not in wheel
+
+
+def test_docker_image_installs_payer_mcp_extra_for_agent_profile() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "'/app/packages/payer[mcp]'" in dockerfile
+    assert 'command: ["xrpl-mpp", "mcp"]' in compose
+    assert "import fastmcp, xrpl_mpp_payer.mcp as module" in ci
+
+
+def test_publish_workflow_is_verification_gated_and_testpypi_provenance_safe() -> None:
+    publish = (
+        REPO_ROOT / ".github/workflows/publish-package.yml"
+    ).read_text(encoding="utf-8")
+    conformance = (
+        REPO_ROOT / ".github/workflows/conformance.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "workflow_call:" in conformance
+    assert "needs: [resolve, release-verification, conformance]" in publish
+    assert '"xrpl-mpp-core==${PACKAGE_VERSION}"' in publish
+    assert '"xrpl-mpp-client==${PACKAGE_VERSION}"' in publish
+    assert "download --no-deps --only-binary=:all:" in publish
+    assert 'artifacts=("$artifact_dir"/*.whl)' in publish
+    assert '--extra-index-url "$EXTRA_INDEX_URL"' not in publish
