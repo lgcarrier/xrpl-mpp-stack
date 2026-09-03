@@ -1,5 +1,5 @@
 [build-system]
-requires = ["editables>=0.5", "hatchling>=1.27,<1.32"]
+requires = ["editables>=0.5", "hatchling>=1.27,<1.33"]
 build-backend = "hatchling.build"
 
 [project]
@@ -25,12 +25,12 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "fastapi==0.136.1",
-  "pydantic-settings==2.14.0",
-  "python-dotenv==1.2.2",
-  "redis==7.4.0",
-  "slowapi==0.1.9",
-  "structlog==25.5.0",
+  "fastapi==0.141.1",
+  "pydantic-settings==2.15.0",
+  "python-dotenv==1.2.3",
+  "redis==8.1.0",
+  "slowapi==0.1.10",
+  "structlog==26.1.0",
   "uvicorn>=0.30.6,<1",
   "xrpl-py>=5.0,<6",
   "xrpl-mpp-core>=0.2.0,<0.3.0",

@@ -4,8 +4,8 @@
 -e ./packages/client
 -e ./packages/payer
 -e ./packages/mcp
-build>=1.4.4,<2
+build>=1.6.0,<2
 editables>=0.6
-hatchling>=1.29.0
-pytest==9.0.3
-twine>=6.2.0,<7
+hatchling>=1.32.0
+pytest==9.1.1
+twine>=7.0.0,<8
