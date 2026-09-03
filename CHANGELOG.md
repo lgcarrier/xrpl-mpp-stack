@@ -44,6 +44,8 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 - Added fail-closed publish gates for the full local suite, docs, container,
   and pinned conformance workflow, and moved wheel licenses into each
   distribution's PEP 639 metadata directory.
+- Aligned all six build backends on Hatchling 1.32 with Twine 7 metadata 2.5
+  validation while retaining a `<1.33` upper bound.
 
 ### Breaking changes
 

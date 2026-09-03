@@ -24,6 +24,10 @@ Every wheel must carry `LICENSE` under its own `.dist-info/licenses/`
 directory. Do not force-include a shared top-level `site-packages/LICENSE`,
 because uninstalling one stack distribution can then remove another's file.
 
+All six build backends use `hatchling>=1.27,<1.33`. Hatchling 1.32 emits core
+metadata 2.5, so release validation requires Twine 7 or newer; keep the package
+constraints and the development tooling in sync when either dependency moves.
+
 ## Required verification
 
 ```bash
@@ -72,6 +76,22 @@ client-v0.2.0
 payer-v0.2.0
 mcp-v0.2.0
 ```
+
+Pre-create and review the exact GitHub environments selected by the workflow:
+
+| Package target | TestPyPI environment | PyPI environment |
+| --- | --- | --- |
+| `core` | `testpypi-core` | `pypi-core` |
+| `facilitator` | `testpypi-facilitator` | `pypi-facilitator` |
+| `middleware` | `testpypi-middleware` | `pypi-middleware` |
+| `client` | `testpypi-client` | `pypi-client` |
+| `payer` | `testpypi-payer` | `pypi-payer` |
+| `mcp` | `testpypi-mcp` | `pypi-mcp` |
+
+Each environment must match a trusted publisher on its target index. For a new
+project such as `xrpl-mpp-mcp`, configure the pending publisher on TestPyPI and
+PyPI before its first workflow run; creating the GitHub environment alone does
+not reserve the package or authorize an upload.
 
 Before pushing a tag, verify it points at the reviewed commit, the tag version
 matches package metadata, trusted-publisher environments target the correct

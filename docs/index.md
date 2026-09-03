@@ -9,16 +9,31 @@ XRPL method implemented by the
 [Ripple reference SDK](https://github.com/ripple/xrpl-mpp-sdk). It is a clean
 wire break from the repository's 0.1 session design.
 
-## Choose a package
+## Package Chooser
 
-| Package | Use it for |
-| --- | --- |
-| `xrpl-mpp-core` | MPP HTTP wire models, codecs, challenge binding, and XRPL profile types |
-| `xrpl-mpp-facilitator` | Verifying and settling XRPL credentials behind authenticated seller gateways |
-| `xrpl-mpp-middleware` | Protecting ASGI routes, issuing challenges, discovery, hooks, and relay |
-| `xrpl-mpp-client` | Signing charges and PayChannel claims and retrying with `httpx` |
-| `xrpl-mpp-payer` | Operating a payer CLI, local proxy, receipt store, or agent-facing service |
-| `xrpl-mpp-mcp` | Adding native MPP payment metadata to MCP/JSON-RPC operations |
+Pick the package for the role you are building. Most HTTP integrators start
+with `xrpl-mpp-middleware` on the seller side or `xrpl-mpp-client` on the buyer
+side, then add `xrpl-mpp-facilitator` as the verifier/settler service. For
+native paid MCP operations, combine `xrpl-mpp-mcp` with the client or payer
+package that fits your application.
+
+These guides describe the 0.2 line. Each badge reports the version PyPI serves
+right now; install only when it shows a compatible `0.2.x` release.
+
+| Package | PyPI | Install | Use when |
+| --- | --- | --- | --- |
+| [Core](packages/core.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-core?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-core/) | `pip install xrpl-mpp-core` | You need the shared MPP HTTP models, codecs, challenge binding, or XRPL profile types directly. |
+| [Facilitator](packages/facilitator.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-facilitator?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-facilitator/) | `pip install xrpl-mpp-facilitator` | You are running the authenticated verifier/settler service used by seller gateways. |
+| [Middleware](packages/middleware.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-middleware?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-middleware/) | `pip install xrpl-mpp-middleware` | You are protecting ASGI or FastAPI routes, issuing challenges, or adding discovery, hooks, and relay. |
+| [Client](packages/client.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-client?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-client/) | `pip install xrpl-mpp-client` | You are building a buyer that signs charge or PayChannel credentials and retries with `httpx`. |
+| [Payer](packages/payer.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-payer?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-payer/) | `pip install xrpl-mpp-payer` | You want a turnkey buyer CLI, local proxy, receipts, spend policy, or optional agent server. |
+| [MCP Transport](packages/mcp.md) | [![PyPI version](https://img.shields.io/pypi/v/xrpl-mpp-mcp?logo=pypi&logoColor=white)](https://pypi.org/project/xrpl-mpp-mcp/) | `pip install xrpl-mpp-mcp` | You are adding framework-neutral MPP challenges, credentials, receipts, and errors to MCP/JSON-RPC operations. |
+
+For the shortest HTTP path, read the [middleware guide](packages/middleware.md),
+the [client guide](packages/client.md), then run the [Testnet XRP
+quickstart](quickstart/testnet-xrp.md). For native MCP transport, start with the
+[MCP package guide](packages/mcp.md) and add the [payer](packages/payer.md) when
+you need an operator- or agent-facing client.
 
 ## What is implemented
 
