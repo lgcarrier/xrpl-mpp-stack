@@ -556,7 +556,7 @@ def test_demo_trace_blocks_unfunded_issued_currency(monkeypatch) -> None:
         lambda _c, address, _issuer, *, currency_code: issued[address],
     )
 
-    with pytest.raises(trace.DemoPreflightError, match="only has 0 RLUSD"):
+    with pytest.raises(trace.DemoPreflightError, match="only has 0 RLUSD") as exc_info:
         asyncio.run(
             trace.run_demo_trace(
                 signer=signer,
@@ -574,6 +574,11 @@ def test_demo_trace_blocks_unfunded_issued_currency(monkeypatch) -> None:
                 ),
             )
         )
+
+    assert (
+        "python -m devtools.rlusd_fund --target-rlusd 10 --max-xrp 35"
+        in str(exc_info.value)
+    )
 
 
 def _session_challenge(*, path: str, amount: str, channel_id: str, cumulative: str | None):

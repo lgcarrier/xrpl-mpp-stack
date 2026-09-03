@@ -6,6 +6,11 @@ from decimal import Decimal
 
 import devtools.live_testnet_support as support
 from xrpl.wallet import Wallet
+from xrpl_mpp_core import RLUSD_TESTNET_ISSUER
+
+
+def test_default_rlusd_testnet_issuer_matches_core_constant() -> None:
+    assert support.DEFAULT_RLUSD_TESTNET_ISSUER == RLUSD_TESTNET_ISSUER
 
 
 def build_demo_wallet_set() -> support.DemoWalletSet:

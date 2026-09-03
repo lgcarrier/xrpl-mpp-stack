@@ -52,7 +52,7 @@ DEFAULT_PAYMENT_CURRENCY = "XRP"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 XRP_DROPS_PER_XRP = Decimal("1000000")
 ISSUED_CURRENCY_FUNDING_COMMANDS = {
-    "RLUSD": "python -m devtools.rlusd_topup",
+    "RLUSD": "python -m devtools.rlusd_fund --target-rlusd 10 --max-xrp 35",
     "USDC": "python -m devtools.usdc_topup",
 }
 

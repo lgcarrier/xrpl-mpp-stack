@@ -8,7 +8,8 @@ XRP_CODE = "XRP"
 RLUSD_CODE = "RLUSD"
 RLUSD_HEX = "524C555344000000000000000000000000000000"
 RLUSD_MAINNET_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"
-RLUSD_TESTNET_ISSUER = "rnEVYfAWYP5HpPaWQiPSJMyDeUiEJ6zhy2"
+RLUSD_TESTNET_ISSUER = "rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV"
+LEGACY_RLUSD_TESTNET_ISSUER = "rnEVYfAWYP5HpPaWQiPSJMyDeUiEJ6zhy2"
 USDC_CODE = "USDC"
 USDC_HEX = "5553444300000000000000000000000000000000"
 USDC_MAINNET_ISSUER = "rGm7WCVp9gb4jZHWTEtGUr4dd74z2XuWhE"
@@ -88,6 +89,13 @@ def parse_allowed_issued_assets(raw_assets: str) -> list[AssetKey]:
             raise ValueError("ALLOWED_ISSUED_ASSETS entries must use CODE:ISSUER format")
         if normalized_code == XRP_CODE:
             raise ValueError("ALLOWED_ISSUED_ASSETS cannot include XRP")
+        if (
+            normalized_code == RLUSD_CODE
+            and normalized_issuer == LEGACY_RLUSD_TESTNET_ISSUER
+        ):
+            raise ValueError(
+                "The former XRPL Testnet RLUSD issuer is not canonical; update the issuer explicitly"
+            )
 
         asset = AssetKey(code=normalized_code, issuer=normalized_issuer)
         if asset not in seen_assets:

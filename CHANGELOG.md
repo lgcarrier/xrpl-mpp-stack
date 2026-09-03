@@ -4,6 +4,17 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 
 ## Unreleased
 
+### Testnet tooling
+
+- Added `python -m devtools.rlusd_fund`, a browser-free XRPL Testnet workflow
+  that creates or reuses a private wallet, funds XRP, establishes the official
+  RLUSD trust line, and acquires an exact target balance with spend, fee,
+  finality, and crash-safe reconciliation controls. The session-token
+  `rlusd_topup` helper remains available as a legacy fallback.
+- Corrected the built-in Testnet RLUSD issuer to Ripple's current `rQhWct...`
+  account, retained the former `rnEVY...` account as an explicit legacy
+  constant, and reject that former issuer when it is configured as RLUSD.
+
 ### Release automation
 
 - Hardened TestPyPI and PyPI post-publish verification against stale Simple
