@@ -111,6 +111,26 @@ test is intentionally opt-in:
 RUN_XRPL_TESTNET_LIVE=1 pytest -m live tests/integration/test_live_testnet.py -s
 ```
 
+## Fund an RLUSD Testnet wallet
+
+Create a fresh wallet, request XRP from the Testnet faucet, and acquire enough
+official Testnet RLUSD to reach an exact target balance without connecting a
+browser wallet:
+
+```bash
+python -m devtools.rlusd_fund \
+  --new-wallet \
+  --target-rlusd 10 \
+  --max-xrp 35
+```
+
+The command prints its private wallet-file path but never the seed. If a faucet
+request or ledger transaction remains pending, rerun it with that exact path
+via `--wallet-file`. After generating the normal quickstart wallet cache, omit
+both wallet-selection options to fund its dedicated RLUSD buyer instead. See
+the [RLUSD guide](docs/asset-guides/rlusd.md) for the complete funding, demo,
+and recovery workflows.
+
 ## Security defaults
 
 - HTTPS is required for buyer, facilitator, and relay traffic by default;

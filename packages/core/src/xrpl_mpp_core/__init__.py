@@ -1,4 +1,5 @@
 from xrpl_mpp_core.assets import (
+    LEGACY_RLUSD_TESTNET_ISSUER,
     NETWORK_RLUSD_ISSUERS,
     NETWORK_USDC_ISSUERS,
     RLUSD_CODE,
@@ -122,6 +123,7 @@ __all__ = [
     "FacilitatorSupportedResponse",
     "HighWaterDecision",
     "IssuedCurrency",
+    "LEGACY_RLUSD_TESTNET_ISSUER",
     "MPPProblemDetails",
     "MPToken",
     "PAYMENT_AUTHORIZATION_HEADER",

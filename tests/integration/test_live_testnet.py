@@ -773,8 +773,13 @@ def _select_issued_wallets(
         reverse=True,
     )
     if ranked[0][1] < required:
+        funding_command = (
+            "python -m devtools.rlusd_fund --target-rlusd 10 --max-xrp 35"
+            if symbol.lower() == "rlusd"
+            else f"python -m devtools.{symbol}_topup"
+        )
         pytest.skip(
             f"Cached {symbol.upper()} wallets need funding; run "
-            f"`python -m devtools.{symbol}_topup`."
+            f"`{funding_command}`."
         )
     return ranked[0][0], ranked[1][0]

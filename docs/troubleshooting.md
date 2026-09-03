@@ -98,3 +98,24 @@ exchange or another tool call is not transferable.
 Faucets and public RPC endpoints can be unavailable or lagging. Confirm endpoint
 health and the current ledger independently. Keep the live Testnet test opt-in;
 the deterministic suite should still pass without network access.
+
+## RLUSD funding is pending
+
+Pin `XRPL_TESTNET_RPC_URL` when public Testnet endpoints are unhealthy. For a
+wallet created with `--new-wallet`, rerun `python -m devtools.rlusd_fund` with
+the standalone wallet file printed by the first invocation:
+
+```bash
+python -m devtools.rlusd_fund \
+  --wallet-file .live-test-wallets/rlusd-funded-wallet-YYYYMMDDTHHMMSSZ.json \
+  --target-rlusd 10 \
+  --max-xrp 35
+```
+
+For the cached demo buyer, rerun the original command without `--wallet-file`;
+its multi-wallet cache is not accepted as a standalone wallet file. The command
+reconciles every journaled transaction before signing another. Exit status `3`
+means the XRP faucet or ledger transaction is still pending, so preserve both
+the private wallet and funding-state files. Exit status `2` is a bounded
+liquidity or spend-cap refusal, while status `1` indicates a validation or
+infrastructure failure.

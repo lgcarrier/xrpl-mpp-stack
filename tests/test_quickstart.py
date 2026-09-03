@@ -89,6 +89,12 @@ def test_quickstart_main_writes_env_file_and_prints_commands(
     assert "Wrote" in captured.out
     assert "docker compose --env-file" in captured.out
     assert "--profile demo run --rm buyer" in captured.out
+    assert (
+        "python -m devtools.rlusd_fund --target-rlusd 10 --max-xrp 35"
+        in captured.out
+    )
+    assert "python -m devtools.rlusd_topup" not in captured.out
+    assert "python -m devtools.usdc_topup" in captured.out
     assert str(output_path) in captured.out
     assert f"Buyer address: {buyer_wallet.classic_address}" in captured.out
     assert (
