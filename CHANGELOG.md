@@ -4,7 +4,13 @@ All notable changes to the Open XRPL MPP Stack are documented here.
 
 ## Unreleased
 
-### Stack 0.2.0
+### Release automation
+
+- Hardened TestPyPI and PyPI post-publish verification against stale Simple
+  API caches by disabling pip's shared cache and extending the bounded retry
+  delay to ten minutes.
+
+## Stack 0.2.0 - 2026-09-03
 
 - Replaced the repository's pre-standard wire format with the current MPP HTTP
   authentication contract, including RFC 8785 canonical JSON, strict base64url

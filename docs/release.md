@@ -113,6 +113,14 @@ from TestPyPI with dependencies disabled, then install those local artifacts
 while resolving only third-party dependencies from PyPI. Never use PyPI as an
 extra index for selecting the artifact under test.
 
+PyPI and TestPyPI can expose an uploaded file through their JSON API before a
+Simple API cache used by `pip` sees it. Post-publish verification therefore
+bypasses pip's shared HTTP cache and includes ten minutes of bounded retry
+delay, in addition to command runtime. Treat an exhausted visibility window as
+an index-propagation failure: inspect the published files and provenance before
+rerunning only the failed verification job. Never retry the immutable upload
+blindly.
+
 ## 0.2 release note warning
 
 Call out the clean break prominently: named networks, canonical currency

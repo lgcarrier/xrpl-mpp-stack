@@ -303,7 +303,7 @@ jobs:
             requirement="$1"
             venv_path="$2"
 
-            for attempt in 1 2 3 4 5 6; do
+            for attempt in $(seq 1 41); do
               rm -rf "$venv_path"
               python -m venv "$venv_path"
               . "$venv_path/bin/activate"
@@ -312,7 +312,7 @@ jobs:
               mkdir -p "$artifact_dir"
 
               download_args=(
-                download --no-deps --only-binary=:all:
+                download --no-cache-dir --no-deps --only-binary=:all:
                 --dest "$artifact_dir" --index-url "$INDEX_URL"
               )
               downloaded=true
@@ -330,7 +330,7 @@ jobs:
               artifacts=("$artifact_dir"/*.whl)
               installed=false
               if [ "$downloaded" = true ] && [ -f "${artifacts[0]}" ]; then
-                if python -m pip install \
+                if python -m pip install --no-cache-dir \
                   --index-url "$DEPENDENCY_INDEX_URL" "${artifacts[@]}"; then
                   installed=true
                 fi
@@ -340,7 +340,7 @@ jobs:
                   "$artifact_dir/${PACKAGE_NAME//-/_}-${PACKAGE_VERSION}-"*.whl
                 )
                 if [ ! -f "${target_candidates[0]}" ] || ! python -m pip install \
-                  --index-url "$DEPENDENCY_INDEX_URL" \
+                  --no-cache-dir --index-url "$DEPENDENCY_INDEX_URL" \
                   "${PACKAGE_NAME}[mcp] @ file://${target_candidates[0]}"; then
                   installed=false
                 fi
@@ -380,7 +380,7 @@ jobs:
 
               deactivate || true
               rm -rf "$venv_path"
-              if [ "$attempt" -eq 6 ]; then
+              if [ "$attempt" -eq 41 ]; then
                 echo "Unable to install $requirement from the release index" >&2
                 return 1
               fi
@@ -437,13 +437,14 @@ jobs:
             requirement="$1"
             venv_path="$2"
 
-            for attempt in 1 2 3 4 5 6; do
+            for attempt in $(seq 1 41); do
               rm -rf "$venv_path"
               python -m venv "$venv_path"
               . "$venv_path/bin/activate"
               python -m pip install --upgrade pip
 
-              if python -m pip install --index-url "$INDEX_URL" "$requirement"; then
+              if python -m pip install --no-cache-dir \
+                --index-url "$INDEX_URL" "$requirement"; then
                 case "$TARGET" in
                   core)
                     python -c "import xrpl_mpp_core as package; assert package.XRP_CODE == 'XRP'"
@@ -477,7 +478,7 @@ jobs:
 
               deactivate || true
               rm -rf "$venv_path"
-              if [ "$attempt" -eq 6 ]; then
+              if [ "$attempt" -eq 41 ]; then
                 echo "Unable to install $requirement from PyPI" >&2
                 return 1
               fi

@@ -86,6 +86,19 @@ def test_publish_workflow_is_verification_gated_and_testpypi_provenance_safe() -
     assert "needs: [resolve, release-verification, conformance]" in publish
     assert '"xrpl-mpp-core==${PACKAGE_VERSION}"' in publish
     assert '"xrpl-mpp-client==${PACKAGE_VERSION}"' in publish
-    assert "download --no-deps --only-binary=:all:" in publish
+    assert "download --no-cache-dir --no-deps --only-binary=:all:" in publish
     assert 'artifacts=("$artifact_dir"/*.whl)' in publish
     assert '--extra-index-url "$EXTRA_INDEX_URL"' not in publish
+
+
+def test_publish_workflow_bypasses_stale_index_caches_during_verification() -> None:
+    publish = (
+        REPO_ROOT / ".github/workflows/publish-package.yml"
+    ).read_text(encoding="utf-8")
+
+    assert publish.count("for attempt in $(seq 1 41); do") == 2
+    assert publish.count("--no-cache-dir") == 4
+    assert publish.count("if python -m pip install --no-cache-dir") == 2
+    assert '--no-cache-dir --index-url "$DEPENDENCY_INDEX_URL"' in publish
+    assert '--index-url "$INDEX_URL" "$requirement"; then' in publish
+    assert publish.count('if [ "$attempt" -eq 41 ]; then') == 2
