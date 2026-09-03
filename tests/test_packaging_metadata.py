@@ -23,7 +23,7 @@ def test_each_package_has_editable_build_metadata() -> None:
             for requirement in pyproject["build-system"]["requires"]
             if requirement.startswith("hatchling")
         )
-        assert "<1.32" in hatchling_requirement
+        assert hatchling_requirement == "hatchling>=1.27,<1.33"
         assert pyproject["project"]["name"].startswith("xrpl-mpp-")
 
 
