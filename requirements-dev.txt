@@ -4,7 +4,7 @@
 -e ./packages/client
 -e ./packages/payer
 -e ./packages/mcp
-build>=1.6.0,<2
+build>=1.6.1,<2
 editables>=0.6
 hatchling>=1.32.0,<1.33
 pytest==9.1.1
